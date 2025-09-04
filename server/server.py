@@ -4,6 +4,7 @@ from aiohttp import web
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaBlackhole, MediaPlayer, MediaRecorder, MediaRelay
 from av import VideoFrame
+from aiortc import RTCSessionDescription, RTCPeerConnection, RTCConfiguration, RTCIceServer
 
 ROOT = os.path.dirname(__file__)
 logger = logging.getLogger("pc")
@@ -63,8 +64,8 @@ class VideoTransformTrack(MediaStreamTrack):
         canvas = np.zeros((DISPLAY_H, DISPLAY_W, 3), dtype=img.dtype)
         x, y = (DISPLAY_W - nw) // 2, (DISPLAY_H - nh) // 2
         canvas[y:y+nh, x:x+nw] = resized
-        disp = cv2.flip(canvas, 1)
-        cv2.imshow("Smartphone Camera (small, letterboxed, mirrored)", disp)
+        disp = canvas   # flip 제거
+        cv2.imshow("Smartphone Camera (small, letterboxed)", disp)
         if cv2.waitKey(1) & 0xFF == ord("q"):
             print("👋 종료합니다."); cv2.destroyAllWindows(); os._exit(0)
 
@@ -80,7 +81,19 @@ async def offer(request):
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
-    pc = RTCPeerConnection()
+    # STUN + TURN 서버 설정
+    config = RTCConfiguration(iceServers=[
+        RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
+        RTCIceServer(
+            urls=["turn:my-turn-server.com:3478"],
+            username="user",
+            credential="pass"
+        )
+    ])
+
+    # ✅ dict 대신 config 객체 넘기기
+    pc = RTCPeerConnection(config)
+
     pcs.add(pc)
     pc_id = f"PeerConnection({uuid.uuid4()})"
     def log_info(msg, *args): logger.info(pc_id + " " + msg, *args)
