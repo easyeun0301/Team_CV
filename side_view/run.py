@@ -330,7 +330,7 @@ async def process_frame_callback(img):
 
     # OpenCV 윈도우 표시
     disp = cv2.resize(img, (WIN_W, WIN_H), interpolation=cv2.INTER_LINEAR)
-    cv2.imshow("Spine Analysis", disp)
+    cv2.imshow("SpinePose Analysis", disp)
     
     # 종료 처리
     k = cv2.waitKey(1)
@@ -355,8 +355,8 @@ def main():
     print(f"Pipeline: BlazePose → Upper Body Crop → SpinePose")
     
     # OpenCV 윈도우 초기화
-    cv2.namedWindow("BlazePose + SpinePose Analysis", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("BlazePose + SpinePose Analysis", WIN_W, WIN_H)
+    cv2.namedWindow("SpinePose Analysis", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("SpinePose Analysis", WIN_W, WIN_H)
 
     # 서버에 프레임 처리 콜백 등록
     server.set_frame_callback(process_frame_callback)
