@@ -51,12 +51,15 @@ class Config:
     WIN_H: int = 1440
     USE_NATIVE_DISPLAY: bool = True   # True면 원본 해상도로 표시(권장)
     DISP_SCALE: float = 2.0          # 원본 대비 배율(1.0이면 리사이즈 없음)
-    BP_PERIOD_MS: int = 80
-    SP_PERIOD_MS: int = 120
+    BP_PERIOD_MS: int = 110
+    SP_PERIOD_MS: int = 140
     STICKY_MS: int = 500
     SPINE_SCORE_TH: float = 0.1
     INFER_SCALE: float = 0.5
     DRAW_SPINE_ONLY_DEFAULT: bool = True
+    
+
+    WINDOW_TITLE: str = "SpinePose Analysis (Spine-Only)"
     
     # 스파인 키포인트 인덱스
     NECK_IDX: List[int] = field(default_factory=lambda: [36, 35, 18])
@@ -65,6 +68,7 @@ class Config:
     # === 추가: 임계값(각도, 도) ===
     FHP_THRESH_DEG: float = 17.0
     CURVE_THRESH_DEG: float = 10
+
 # ========= (3) 유틸리티 함수들 =========
 def safe_import(name: str):
     """안전한 모듈 import"""
@@ -271,20 +275,26 @@ def lm_to_px_dict(res_lm, w: int, h: int, mp_pl) -> Dict[str, Tuple[int, int, fl
     if not res_lm:
         return d
     
-    for p in mp_pl:
+    for p in mp_pl.PoseLandmark:
         lm = res_lm.landmark[p.value]
-        d[p.name] = (int(lm.x * w), int(lm.y * h), lm.visibility)
+        # 정규화 좌표 -> 픽셀
+        x = int(round(lm.x * w))
+        y = int(round(lm.y * h))
+        d[p.name] = (x, y, lm.visibility)
     return d
 
-def spinepose_infer_any(est: SpinePoseEstimator, img_bgr: np.ndarray, bboxes=None) -> Tuple[List, List]:
-    """SpinePose 추론 실행"""
+def spinepose_infer_any(est: SpinePoseEstimator, img, bboxes=None, *, already_rgb: bool=False) -> Tuple[List, List]:
+    """SpinePose 추론 실행 (이미 RGB면 이중 변환 방지)"""
     if est is None:
         return [], []
-    
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    try:
+        if not already_rgb:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # CHANGED: 필요할 때만
+    except Exception:
+        pass
     
     try:
-        out = est(img_rgb, bboxes) if bboxes is not None else est(img_rgb)
+        out = est(img, bboxes) if bboxes is not None else est(img)
     except Exception as e:
         print(f"[SpinePose] inference error: {e}")
         return [], []
@@ -516,7 +526,6 @@ def calculate_forward_head_posture_torso(sp_kpts, sp_scores, neck_indices, lumba
     except Exception:
         return None
 
-
 def calculate_spinal_curvature(spine_coords: List[Tuple[int, int]]) -> Optional[float]:
     """척추 곡률 계산"""
     if len(spine_coords) < 4:
@@ -579,20 +588,18 @@ def visualize_spine_analysis(img: np.ndarray, sp_kpts: List, sp_scores: List,
     
     return img
 
-
-        # 색상 결정(임계값 절반/이하/초과)
+# 색상 결정(임계값 절반/이하/초과)
 def thr_neck_color(val: Optional[float], th: float):
-    if val is None: return (217, 217, 217)
-    if val < 0.75 * th: return (207, 230, 168)     # 초록
-    if val <= th:      return (176, 243, 255)   # 노랑
-    return (186, 179, 255)                       # 빨강
-        
-def thr_lumbar_color(val: Optional[float], th: float):
-    if val is None: return (217, 217, 217)
-    if val < 0.5 * th: return (207, 230, 168)     # 초록
-    if val <= th:      return (176, 243, 255)   # 노랑
-    return (186, 179, 255)                       # 빨강   
+    if val is None: return (190, 190, 190)
+    if val < 0.75 * th: return (180, 210, 130)   # 초록(파스텔)
+    if val <= th:       return (160, 225, 240)   # 노랑(파스텔)
+    return (160, 150, 240)                       # 빨강(파스텔)
 
+def thr_lumbar_color(val: Optional[float], th: float):
+    if val is None: return (190, 190, 190)
+    if val < 0.5 * th:  return (180, 210, 130)
+    if val <= th:       return (160, 225, 240)
+    return (160, 150, 240)
 
 def render_display_frame(ctx: Context, img_bgr: np.ndarray, result: Dict[str, Any]) -> np.ndarray:
     """디스플레이 프레임 렌더링 (spine-only, 텍스트 확대/네트워크표시 비활성, 고급 보간/AA)"""
@@ -645,8 +652,6 @@ def render_display_frame(ctx: Context, img_bgr: np.ndarray, result: Dict[str, An
         # 허리 곡률(기존 방식 유지)
         spinal_curve = calculate_spinal_curvature(all_spine_coords)
 
-    
-
         neck_color   = thr_neck_color(forward_head, ctx.config.FHP_THRESH_DEG)
         lumbar_color = thr_lumbar_color(spinal_curve, ctx.config.CURVE_THRESH_DEG)
 
@@ -674,7 +679,8 @@ def render_display_frame(ctx: Context, img_bgr: np.ndarray, result: Dict[str, An
     disp_scale = float(getattr(ctx.config, "DISP_SCALE", 1.0))
 
     if use_native and abs(disp_scale - 1.0) < 1e-6:
-        disp = canvas  # 원본 해상도로 표시
+        # 주: 여기선 윈도우 크기 조절용으로 Config 상수 사용 (필요시 ctx.config로 변경 가능)
+        disp = cv2.resize(canvas, (Config.WIN_W, Config.WIN_H), interpolation=cv2.INTER_LINEAR)
         applied_scale = 1.0
     else:
         if use_native:
@@ -709,10 +715,9 @@ def render_display_frame(ctx: Context, img_bgr: np.ndarray, result: Dict[str, An
                         (10, 64), cv2.FONT_HERSHEY_SIMPLEX, font_scale,
                         thr_lumbar_color(spinal_curve, ctx.config.CURVE_THRESH_DEG), thickness, cv2.LINE_AA)
 
+    server.processed_frame = disp.copy()
+
     return disp
-
-
-
 
 # ========= (9) 프레임 콜백 함수 =========
 async def process_frame_callback(ctx: Context, img_bgr: np.ndarray) -> np.ndarray:
@@ -742,31 +747,39 @@ def inference_worker(ctx: Context):
             
             img_bgr, W, H = frame
 
+            # 프레임당 1회만 BGR->RGB (모델 공용)  -------- CHANGED
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
             # ---- (A) BlazePose: 주기적 ROI 갱신 ----
             now_ms = time.perf_counter() * 1000.0
             
             if now_ms >= ctx.next_bp_ts:
                 ctx.next_bp_ts = now_ms + ctx.config.BP_PERIOD_MS
 
-                # 다운스케일 추론
+                # 다운스케일 추론 (RGB에서 다운스케일)  ---- CHANGED
                 if 0 < ctx.infer_scale < 1.0:
-                    small = cv2.resize(img_bgr, (int(W * ctx.infer_scale), int(H * ctx.infer_scale)),
+                    small = cv2.resize(img_rgb, (int(W * ctx.infer_scale), int(H * ctx.infer_scale)),
                                      interpolation=cv2.INTER_AREA)
                     sw, sh = small.shape[1], small.shape[0]
-                    res = ctx.pose.process(cv2.cvtColor(small, cv2.COLOR_BGR2RGB))
+                    res = ctx.pose.process(small)
                     
-                    # 좌표 스케일업
+                    # 좌표 스케일업 (round 후 int)  ---- CHANGED
                     if res and res.pose_landmarks:
-                        lm_px_small = lm_to_px_dict(res.pose_landmarks, sw, sh, ctx.mp_pl.PoseLandmark)
-                        lm_px = {k: (int(v[0]/ctx.infer_scale), int(v[1]/ctx.infer_scale), v[2])
-                                for k, v in lm_px_small.items()}
+                        lm_px_small = lm_to_px_dict(res.pose_landmarks, sw, sh, ctx.mp_pl)
+                        lm_px = {
+                            k: (int(round(v[0] / ctx.infer_scale)),
+                                int(round(v[1] / ctx.infer_scale)),
+                                v[2])
+                            for k, v in lm_px_small.items()
+                        }
                         raw_roi = make_side_roi_from_mp(lm_px, W, H, margin=0.10, square_pad=True, pad_ratio=0.10)
                     else:
                         raw_roi = ctx.last_roi if ctx.last_roi else (int(W*0.2), int(H*0.2), int(W*0.8), int(H*0.8))
                 else:
-                    res = ctx.pose.process(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-                    if res.pose_landmarks:
-                        lm_px = lm_to_px_dict(res.pose_landmarks, W, H, ctx.mp_pl.PoseLandmark)
+                    # 원본 RGB로 BP 실행  ---- CHANGED
+                    res = ctx.pose.process(img_rgb)
+                    if res and res.pose_landmarks:
+                        lm_px = lm_to_px_dict(res.pose_landmarks, W, H, ctx.mp_pl)
                         raw_roi = make_side_roi_from_mp(lm_px, W, H, margin=0.10, square_pad=True, pad_ratio=0.10)
                     else:
                         raw_roi = ctx.last_roi if ctx.last_roi else (int(W*0.2), int(H*0.2), int(W*0.8), int(H*0.8))
@@ -774,7 +787,7 @@ def inference_worker(ctx: Context):
                 bp_t1 = time.perf_counter()
                 ctx.bp_hist.append(bp_t1 - t0)
 
-                # ROI 스무딩
+                # ROI 스무딩 + 성공 시 갱신  ---- CHANGED
                 ctx.last_roi = smooth_roi(ctx.last_roi, raw_roi, alpha=0.7, max_scale_step=0.10, frame_w=W, frame_h=H)
 
             # ---- (B) SpinePose: 주기적 추론 ----
@@ -786,7 +799,8 @@ def inference_worker(ctx: Context):
                 bbox = [[x1, y1, x2, y2]]
                 
                 sp_t0 = time.perf_counter()
-                sp_kpts, sp_scores = spinepose_infer_any(ctx.spine_est, img_bgr, bboxes=bbox)
+                # SpinePose에도 같은 RGB를 전달, 이중 변환 금지  ---- CHANGED
+                sp_kpts, sp_scores = spinepose_infer_any(ctx.spine_est, img_rgb, bboxes=bbox, already_rgb=True)
                 sp_t1 = time.perf_counter()
                 ctx.sp_hist.append(sp_t1 - sp_t0)
 
@@ -811,7 +825,7 @@ def inference_worker(ctx: Context):
             except Exception:
                 pass
 
-            # 디스플레이용 프레임 생성
+            # 디스플레이용 프레임 생성 (원본 BGR 위에 오버레이)
             disp = render_display_frame(ctx, img_bgr, result)
             safe_queue_put(ctx.display_q, disp, replace_if_full=True)
 
@@ -821,8 +835,9 @@ def inference_worker(ctx: Context):
             print(f"[Worker] error: {e}")
 
 # ========= (11) 디스플레이 워커 =========
-def display_worker(ctx: Context, window_title: str = "SpinePose Analysis (Spine-Only)"):
-    """디스플레이 전용 스레드(프레임 크기에 맞춰 창 자동 조정, 비율 유지, 현재 크기 콘솔 출력)"""
+def display_worker(ctx: Context):
+    """디스플레이 전용 스레드"""
+    window_title = Config.WINDOW_TITLE   # ✅ Config에서 바로 불러오기
     cv2.namedWindow(window_title, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
 
     try:
@@ -838,22 +853,11 @@ def display_worker(ctx: Context, window_title: str = "SpinePose Analysis (Spine-
 
             h, w = disp.shape[:2]
             if (w, h) != last_sz:
-                # 창 크기를 현재 프레임 크기에 맞춤
                 try:
                     cv2.resizeWindow(window_title, w, h)
                 except Exception:
                     pass
-
-                # 콘솔에 현재 표시 해상도와 대략 배율 표시
-                base_w, base_h = getattr(ctx, "_canvas_size", (w, h))
-                try:
-                    sx = w / float(base_w)
-                    sy = h / float(base_h)
-                    approx_scale = (sx + sy) / 2.0
-                except Exception:
-                    approx_scale = 1.0
-                print(f"[Display] window size: {w}x{h} (≈{approx_scale:.2f}x)")
-
+                print(f"[Display] window size: {w}x{h}")
                 last_sz = (w, h)
 
             cv2.imshow(window_title, disp)
@@ -866,19 +870,20 @@ def display_worker(ctx: Context, window_title: str = "SpinePose Analysis (Spine-
         cv2.destroyAllWindows()
 
 
+
 # ========= (12) 시스템 초기화 =========
 def initialize_models(model_size: str = "small") -> Tuple[SpinePoseEstimator, Any, Any]:
     """AI 모델들 초기화"""
     try:
         spine_est = SpinePoseEstimator(mode=model_size, device="cpu")
-        print(f"✓ SpinePose mode={model_size} loaded")
+        print(f"SpinePose mode={model_size} loaded")
     except Exception as e:
-        print(f"✗ SpinePose load failed: {e}")
+        print(f"SpinePose load failed: {e}")
         try:
             spine_est = SpinePoseEstimator(device="cpu")
-            print("✓ SpinePose default model loaded")
+            print("SpinePose default model loaded")
         except Exception as e2:
-            print(f"✗ SpinePose completely failed: {e2}")
+            print(f"SpinePose completely failed: {e2}")
             raise e2
 
     mp_pose = mp.solutions.pose
