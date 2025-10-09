@@ -484,10 +484,10 @@ def main():
 
                 # 첫 프레임일 때만 st.image() 생성
                 if front_img is None:
-                    front_img = front_placeholder.image(front_rgb, channels="RGB", width=480)
+                    front_img = front_placeholder.image(front_rgb, channels="RGB", width=640)
                 else:
                     # 이후에는 기존 이미지 갱신만 수행 (DOM 재생성 없음)
-                    front_img.image(front_rgb, channels="RGB", width=480)
+                    front_img.image(front_rgb, channels="RGB", width=640)
             else:
                 front_placeholder.text("Front AI Loading...")
 
