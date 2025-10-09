@@ -359,8 +359,9 @@ def main():
     # -> 이 객체가 실제로 카메라 켜고, 서버 띄우고, 프레임 버퍼 관리
     stream_manager = get_optimized_stream_manager(port)
     
+    # ────────────────────────────────
     # 컨트롤 패널
-    # 제어판 섹션 생성 후 화면을 두 컬럼으로 나눔
+    # ────────────────────────────────
     st.markdown("### 제어판")
     col1, col2 = st.columns(2) # col1은 버튼, col2는 상태 표시 텍스트
     
@@ -392,12 +393,14 @@ def main():
         # 현재 세션의 상태를 간단한 텍스트로 보여줌
         st.write(f"상태: {'실행 중' if st.session_state.streaming else '정지'}")
     
+    # ────────────────────────────────
     # 스트리밍 표시
+    # ────────────────────────────────
     if st.session_state.streaming:
         st.markdown("### Front_view + Side_view")  # 제목 표시
         
-        # 두 개의 컬럼으로 나누기
-        col_front, col_side = st.columns([0.6, 1.4]) # 맨 오른쪽에 알림 추가할 거 대비해서 side_view를 왼쪽으로 밀었음, 1006 수정
+        # 한 행: Front / Side / 옵션+상태 (1009 수정)
+        col_front, col_side, col_option = st.columns([1, 1, 1]) # 맨 오른쪽에 옵션+상태 배치
         
         # 한 번만 공간 확보 (빈 이미지 영역 생성), 1006 수정
         front_placeholder = col_front.empty()
@@ -408,53 +411,50 @@ def main():
         side_img = None
 
         # ────────────────────────────────
-        # Front View 옵션 제어 + 상태 요약 (좌우 분할)
+        # Front View 옵션 제어 + 상태 요약 (한 열에 세로 정렬)
         # ────────────────────────────────
-        st.markdown("---")
-        st.markdown("## Front View 옵션")
+        with col_option:
+            st.markdown("### Front View 옵션")
 
-        # 두 개의 컬럼 생성 — 왼쪽: 제어 / 오른쪽: 상태
-        col_ctrl, col_state = st.columns([1, 1])  # 왼쪽이 약간 더 넓게
+            # ----- 옵션 설정 -----
+            with st.container():
+                st.markdown("#### 옵션 설정")
 
-        # 왼쪽 제어판
-        with col_ctrl:
-            st.markdown("### 옵션 설정")
+                colA, colB = st.columns(2)
 
-            colA, colB = st.columns(2)
+                # 임계값 설정
+                if colA.button("Threshold 설정(RELAX1 < RELAX2 < Strict)", key="thr_btn_once"):
+                    stream_manager.front_analyzer.cycle_threshold_profile(+1)
 
-            # 임계값 설정
-            if colA.button("Threshold 설정(RELAX1 < RELAX2 < Strict)", key="thr_btn_once"):
-                stream_manager.front_analyzer.cycle_threshold_profile(+1)
+                # keypoint 표시
+                if colA.button("Key Points 표시", key="pts_btn_once"):
+                    stream_manager.front_analyzer.SHOW_POINTS = not stream_manager.front_analyzer.SHOW_POINTS
+                
+                # EAR 보정
+                if colA.button("눈 깜빡임 보정", key="ear_btn_once"):
+                    if len(stream_manager.front_analyzer.ear_window) >= 10:
+                        arr = np.array(stream_manager.front_analyzer.ear_window, dtype=np.float32)
+                        med = float(np.median(arr))
+                        p10 = float(np.percentile(arr, 10))
+                        stream_manager.front_analyzer.T_LOW = max(0.08, min(med * 0.75, p10 + 0.02))
+                        stream_manager.front_analyzer.T_HIGH = max(stream_manager.front_analyzer.T_LOW + 0.02, med * 0.92)
+                        stream_manager.front_analyzer.calibrated = True
+                    else:
+                        st.toast("⚠️ EAR 데이터가 부족합니다 (눈 깜빡임 감지 후 다시 시도)")
 
-            # keypoint 표시
-            if colA.button("Key Points 표시", key="pts_btn_once"):
-                stream_manager.front_analyzer.SHOW_POINTS = not stream_manager.front_analyzer.SHOW_POINTS
-            
-            # EAR 보정
-            if colA.button("눈 깜빡임 보정", key="ear_btn_once"):
-                if len(stream_manager.front_analyzer.ear_window) >= 10:
-                    arr = np.array(stream_manager.front_analyzer.ear_window, dtype=np.float32)
-                    med = float(np.median(arr))
-                    p10 = float(np.percentile(arr, 10))
-                    stream_manager.front_analyzer.T_LOW = max(0.08, min(med * 0.75, p10 + 0.02))
-                    stream_manager.front_analyzer.T_HIGH = max(stream_manager.front_analyzer.T_LOW + 0.02, med * 0.92)
-                    stream_manager.front_analyzer.calibrated = True
-                else:
-                    st.toast("⚠️ EAR 데이터가 부족합니다 (눈 깜빡임 감지 후 다시 시도)")
+                # CLAHE
+                if colB.button("명암 대비 조정", key="clahe_btn_once"):
+                    stream_manager.front_analyzer.use_clahe = not stream_manager.front_analyzer.use_clahe
 
-            # CLAHE
-            if colB.button("명암 대비 조정", key="clahe_btn_once"):
-                stream_manager.front_analyzer.use_clahe = not stream_manager.front_analyzer.use_clahe
+                # 투명도 조절
+                if colB.button("투명도 ↑ (+)", key="alpha_up_once"):
+                    stream_manager.front_analyzer.ALPHA = min(1.0, stream_manager.front_analyzer.ALPHA + 0.1)
+                if colB.button("투명도 ↓ (-)", key="alpha_dn_once"):
+                    stream_manager.front_analyzer.ALPHA = max(0.1, stream_manager.front_analyzer.ALPHA - 0.1)
 
-            # 투명도 조절
-            if colB.button("투명도 ↑ (+)", key="alpha_up_once"):
-                stream_manager.front_analyzer.ALPHA = min(1.0, stream_manager.front_analyzer.ALPHA + 0.1)
-            if colB.button("투명도 ↓ (-)", key="alpha_dn_once"):
-                stream_manager.front_analyzer.ALPHA = max(0.1, stream_manager.front_analyzer.ALPHA - 0.1)
-
-        # 오른쪽 상태판
-        with col_state:
-            st.markdown("### 현재 설정 상태")
+            # ----- 상태 요약 -----
+            st.markdown("---")
+            st.markdown("#### 현재 설정 상태")
 
             analyzer = stream_manager.front_analyzer
             col_status1, col_status2 = st.columns(2)
