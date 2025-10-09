@@ -39,8 +39,9 @@ MIN_PX_THR = 2.0
 EMA_ALPHA  = 0.2
 
 # ====== 경량화 관련 추가 설정 ======
-PROC_W, PROC_H = 640, 360      # 처리용 다운스케일 크기
-FRAME_SKIP_N   = 2             # 매 2프레임마다 한 번 추론 (1이면 매 프레임 추론)
+PROC_W, PROC_H = 640, 360
+FACE_SKIP_N = 1    # FaceMesh: 매 프레임
+POSE_SKIP_N = 3    # BlazePose: 3프레임마다
 
 # ================== 상태값 ==================
 blink_count = 0
@@ -227,6 +228,54 @@ with mp_face.FaceMesh(
         "BLUE": (190,160,0), "ORANGE": (0,140,255)
     }
 
+# ====== 경량화 관련 추가 설정 ======
+PROC_W, PROC_H = 640, 360
+FACE_SKIP_N = 2    # FaceMesh: 2프레임마다
+POSE_SKIP_N = 3    # BlazePose: 3프레임마다
+
+# ================== 상태값 ==================
+blink_count = 0
+eye_closed = False
+win_start = time.time()
+flip_view = False
+ema_vals = {}
+
+consecutive_closed = 0
+consecutive_open = 0
+left_eye_closed = False
+right_eye_closed = False
+ear_history = deque(maxlen=100)
+ear_baseline = None
+
+# 프레임 카운터
+frame_idx = 0
+last_face_landmarks = None
+last_pose_landmarks = None
+
+# ... (나머지 초기화 코드는 동일) ...
+
+with mp_face.FaceMesh(
+        static_image_mode=False,
+        max_num_faces=1,
+        refine_landmarks=False,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    ) as face_mesh, \
+    mp_pose.Pose(
+        model_complexity=0,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    ) as pose:
+
+    fps_deque = deque(maxlen=20)
+    last_time = time.time()
+
+    global_colors = {
+        "GREEN": (0,210,0), "RED": (0,0,230), "YEL": (0,220,220),
+        "WHITE": (230,230,230), "GRAY": (160,160,160), "CYAN": (200,255,255),
+        "BLUE": (190,160,0), "ORANGE": (0,140,255)
+    }
+
     while cap.isOpened():
         ok, frame = cap.read()
         if not ok:
@@ -241,26 +290,37 @@ with mp_face.FaceMesh(
         proc_rgb = cv2.cvtColor(proc, cv2.COLOR_BGR2RGB)
         proc_rgb.flags.writeable = False
 
-        run_inference = (frame_idx % FRAME_SKIP_N == 0)
+        # 추론 여부 결정
+        run_face_inference = (frame_idx % FACE_SKIP_N == 0)
+        run_pose_inference = (frame_idx % POSE_SKIP_N == 0)
         frame_idx += 1
 
-        # ================== FaceMesh/Pose 추론 (프레임 스킵 적용) ==================
-        if run_inference:
+        # ================== FaceMesh 추론 ==================
+        if run_face_inference:
             results_face = face_mesh.process(proc_rgb)
-            results_pose = pose.process(proc_rgb)
-            last_face_landmarks = results_face.multi_face_landmarks[0].landmark if results_face.multi_face_landmarks else None
-            last_pose_landmarks = results_pose.pose_landmarks.landmark if results_pose.pose_landmarks else None
+            if results_face.multi_face_landmarks:
+                last_face_landmarks = results_face.multi_face_landmarks[0].landmark
         else:
-            # 스킵 프레임: 직전 결과 재사용
+            # 이전 결과 재사용
             class Dummy: pass
             results_face = Dummy()
-            results_pose = Dummy()
-            results_face.multi_face_landmarks = [Dummy()] if last_face_landmarks is not None else None
-            if results_face.multi_face_landmarks:
+            results_face.multi_face_landmarks = None
+            if last_face_landmarks is not None:
+                results_face.multi_face_landmarks = [Dummy()]
                 results_face.multi_face_landmarks[0].landmark = last_face_landmarks
 
-            results_pose.pose_landmarks = Dummy() if last_pose_landmarks is not None else None
+        # ================== Pose 추론 ==================
+        if run_pose_inference:
+            results_pose = pose.process(proc_rgb)
             if results_pose.pose_landmarks:
+                last_pose_landmarks = results_pose.pose_landmarks.landmark
+        else:
+            # 이전 결과 재사용
+            class Dummy: pass
+            results_pose = Dummy()
+            results_pose.pose_landmarks = None
+            if last_pose_landmarks is not None:
+                results_pose.pose_landmarks = Dummy()
                 results_pose.pose_landmarks.landmark = last_pose_landmarks
 
         proc_rgb.flags.writeable = True
@@ -280,8 +340,6 @@ with mp_face.FaceMesh(
         # ================== FaceMesh: 최소 포인트만 사용 ==================
         if results_face.multi_face_landmarks:
             flm = results_face.multi_face_landmarks[0].landmark
-
-            # 필요한 포인트만 원본 좌표계로 변환
             P = pick_points(flm, w, h)
 
             # IPD
@@ -299,7 +357,7 @@ with mp_face.FaceMesh(
             thr_cheek = adaptive_thresh(ipd_px, Y_THR_RATIO_CHEEK)
             thr_mid   = adaptive_thresh(ipd_px, X_THR_RATIO_MID)
 
-            # 지표 계산 + EMA(시각화용만 유지)
+            # 지표 계산 + EMA
             dy_brow  = abs(brow_L[1] - brow_R[1]);   dy_brow_s  = ema("dy_brow", dy_brow)
             L_eye_c  = (L_eye_outer + L_eye_inner)/2.0
             R_eye_c  = (R_eye_outer + R_eye_inner)/2.0
@@ -313,7 +371,7 @@ with mp_face.FaceMesh(
             mid_ok   = dx_mid_s   is not None and dx_mid_s   <= thr_mid
             head_level_face = (brow_ok or eye_ok or cheek_ok or mid_ok)
 
-            # 보조선/마커/라벨
+            # 시각화
             draw_line(image, brow_L, brow_R, GREEN if brow_ok else RED, 3)
             draw_marker(image, brow_L, BLUE, 4); draw_marker(image, brow_R, BLUE, 4)
             put_text(image, f"Brows dy={dy_brow_s:.1f}/{thr_brow:.1f}px", (30, 80),
@@ -334,8 +392,7 @@ with mp_face.FaceMesh(
             put_text(image, f"Mid   dx={dx_mid_s:.1f}/{thr_mid:.1f}px", (30, 170),
                      GREEN if mid_ok else RED, 0.65, 2)
 
-            # ================== EAR/깜빡임 ==================
-            # EAR 계산에 필요한 포인트만 사용
+            # EAR/깜빡임
             le = [P["LE_1"], P["LE_2"], P["LE_3"], P["LE_5"], P["LE_6"], P["LE_4"]]
             re = [P["RE_1"], P["RE_2"], P["RE_3"], P["RE_5"], P["RE_6"], P["RE_4"]]
             ear_l = compute_ear_from_points(*le)
@@ -347,10 +404,9 @@ with mp_face.FaceMesh(
                 ear_thr = get_dynamic_threshold(BASE_EAR_THRESHOLD, ipd_px)
                 detect_blink_improved(ear_l, ear_r, ear_thr)
 
-        # ================== Pose: 어깨/코 (경량화) ==================
+        # ================== Pose: 어깨/코 ==================
         if results_pose.pose_landmarks:
             lm = results_pose.pose_landmarks.landmark
-            # Pose는 mp가 normalized 값(0~1)을 주므로 원본 좌표계로 변환
             def get_xy(idx): 
                 L = lm[idx]
                 return np.array([L.x * w, L.y * h], dtype=np.float32)
@@ -382,7 +438,7 @@ with mp_face.FaceMesh(
             put_text(image, f"Nose   dx={dx_nc_s:.1f}/{thr_nose:.1f}px",
                      (30, 240), GREEN if nose_aligned else RED, 0.65, 2)
 
-        # ================== 최상단 타이틀/패널/깜빡임 표시 ==================
+        # ================== 상태 표시 ==================
         any_ok = None
         if head_level_face is not None or (shoulders_level is not None and nose_aligned is not None):
             face_ok = bool(head_level_face) if head_level_face is not None else False
@@ -393,6 +449,7 @@ with mp_face.FaceMesh(
         title_color = (0, 200, 0) if any_ok else ((0, 0, 230) if any_ok is not None else (200,200,200))
         put_text(image, title, (30, 40), title_color, 1.0, 2)
 
+        # 패널
         panel_w = 330
         image = draw_panel(image, w - panel_w - 20, 20, panel_w, 185, 0.35)
         px, py = w - panel_w - 10, 42
@@ -401,10 +458,11 @@ with mp_face.FaceMesh(
         put_text(image, "Red  =tilted / misaligned", (px, py), (150,150,255), 0.58, 2); py += 22
         put_text(image, "Keys: [f] flip  [r] reset  [q] quit", (px, py), GRAY, 0.58, 2); py += 22
 
-        # EAR/임계/상태 요약
+        # EAR 베이스라인
         if ear_baseline is not None:
             put_text(image, f"Baseline: {ear_baseline:.3f} (Hist:{len(ear_history)})", (30, h-70), CYAN, 0.6, 1)
 
+        # 깜빡임 정보
         now = time.time()
         elapsed = now - win_start
         if elapsed >= BLINK_WINDOW_SEC:
@@ -428,7 +486,7 @@ with mp_face.FaceMesh(
             put_text(image, f"FPS: {fps:.1f}", (w - 130, h - 20), (200,200,200), 0.8, 2)
 
         # 하단 도움말
-        put_text(image, "Front-only | Enhanced Blink Detection (Lite)", (30, h - 25), GRAY, 0.65, 2)
+        put_text(image, f"Face:{FACE_SKIP_N} Pose:{POSE_SKIP_N} | Enhanced Blink (Lite)", (30, h - 25), GRAY, 0.6, 2)
 
         cv2.imshow("Front Posture - Lite", image)
         key = cv2.waitKey(1) & 0xFF
