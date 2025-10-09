@@ -47,27 +47,34 @@ logging.getLogger('absl').disabled = True
 @dataclass
 class Config:
     """시스템 설정 상수들"""
-    WIN_W: int = 720
-    WIN_H: int = 1440
-    USE_NATIVE_DISPLAY: bool = True   # True면 원본 해상도로 표시(권장)
-    DISP_SCALE: float = 2.0          # 원본 대비 배율(1.0이면 리사이즈 없음)
-    BP_PERIOD_MS: int = 110
-    SP_PERIOD_MS: int = 140
-    STICKY_MS: int = 500
-    SPINE_SCORE_TH: float = 0.1
-    INFER_SCALE: float = 0.5
-    DRAW_SPINE_ONLY_DEFAULT: bool = True
-    
+    WIN_W: int = 480
+    WIN_H: int = 640
 
-    WINDOW_TITLE: str = "SpinePose Analysis (Spine-Only)"
+    # ✅ Streamlit 출력 해상도 (고정값)
+    STREAMLIT_OUTPUT_W: int = 480   # Streamlit으로 전송할 너비
+    STREAMLIT_OUTPUT_H: int = 640  # Streamlit으로 전송할 높이
     
-    # 스파인 키포인트 인덱스
+    # Display 윈도우 크기 (로컬 디버깅용, Streamlit과 별개)
+    DISPLAY_WINDOW_W: int = 480
+    DISPLAY_WINDOW_H: int = 640
+    
+    BP_PERIOD_MS: int = 500
+    SP_PERIOD_MS: int = 600
+    STICKY_MS: int = 600
+    SPINE_SCORE_TH: float = 0.1
+    INFER_SCALE: float = 0.25
+
+    # 기본 표시 모드
+    DRAW_SPINE_ONLY_DEFAULT: bool = True
+    WINDOW_TITLE: str = "SpinePose Analysis (Spine-Only)"
+
+    # 스파인 키포인트 인덱스(프로젝트 기준)
     NECK_IDX: List[int] = field(default_factory=lambda: [36, 35, 18])
     LUMBAR_IDX: List[int] = field(default_factory=lambda: [30, 28, 19])
 
-    # === 추가: 임계값(각도, 도) ===
-    FHP_THRESH_DEG: float = 17.0
-    CURVE_THRESH_DEG: float = 10
+    # 임계값(각도, 도)
+    FHP_THRESH_DEG: float = 19.0
+    CURVE_THRESH_DEG: float = 18.0
 
 # ========= (3) 유틸리티 함수들 =========
 def safe_import(name: str):
