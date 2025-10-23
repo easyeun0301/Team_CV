@@ -2,62 +2,40 @@ import asyncio, json, logging, uuid, time
 import numpy as np, cv2
 from aiohttp import web
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.media import MediaBlackhole, MediaRelay
-from av import VideoFrame
+from aiortc.contrib.media import MediaRelay
 from aiortc import RTCConfiguration, RTCIceServer
+from av import VideoFrame
 
 logger = logging.getLogger("webrtc")
+
+# ─────────────────────────────────────────────────────────────
+# 전역 상태
+# ─────────────────────────────────────────────────────────────
 pcs = set()
 relay = MediaRelay()
 
-# ─────────────────────────────────────────────────────────────
-# 비동기 프레임 처리 시스템
-# ─────────────────────────────────────────────────────────────
+# AI 콜백 및 프레임 버스(최신 1장만 유지)
 frame_callback = None
-frame_bus: asyncio.Queue | None = None  # 최신 1장만 유지
-processed_frame = None  # Streamlit에서 처리된 이미지를 받아가기 위한 변수
-processed_frame_lock = asyncio.Lock()  # 한 번에 하나의 함수만 processed_frame에 접근하도록 막음
-last_frame_time = 0
-last_processed_time = 0
+frame_bus: asyncio.Queue | None = None  # VideoFrame을 저장
+_callback_gate = asyncio.Semaphore(1)   # 콜백 동시 1개만 실행
 
-def set_frame_callback(callback):
-    """외부에서 프레임 처리 콜백을 설정"""
-    global frame_callback
-    frame_callback = callback
+# 처리 결과 이미지 & 락
+processed_frame = None                  # 최신 처리 결과 (ndarray, BGR)
+processed_frame_lock = asyncio.Lock()
+last_frame_time = 0.0                   # 마지막 수신 프레임 시각
+last_processed_time = 0.0               # 마지막 처리 완료 시각
 
-async def store_processed_frame(frame):
-    """처리된 프레임을 저장 (비동기 버전)"""
-    global processed_frame, last_processed_time
-    async with processed_frame_lock:
-        if frame is not None:
-            processed_frame = frame.copy()
-            last_processed_time = time.time()
+# JPEG 캐시 (결과/빈화면)
+_empty_jpeg = None
+_cached_jpeg = None
+_cached_jpeg_ts = 0.0
 
-## AI 처리 결과 저장(그래야 streamlit에서 접근 가능)하기 위해 _consume_and_call()함수 수정함
-async def _consume_and_call():
-    """frame_bus에서 최신 프레임만 꺼내 외부 콜백을 비동기로 호출"""
-    global frame_bus, frame_callback
-    assert frame_bus is not None
-    
-    while True:
-        try:
-            img = await frame_bus.get()
-            
-            if frame_callback is not None:
-                try:
-                    # 콜백 실행 (비동기)
-                    callback_result = await frame_callback(img)
-                    if callback_result is not None:
-                        await store_processed_frame(callback_result)
-                    else:
-                        await store_processed_frame(img)  # 원본 저장
-                except Exception as e:
-                    logger.error(f"Frame callback error: {e}")
-                
-        except Exception as e:
-            logger.error(f"Frame consumer error: {e}")
+# PC별 리더 태스크 (수신 전용)
+pc_reader_tasks = {}  # pc_id -> asyncio.Task
 
-# 스마트폰 연결 페이지 - 스타일 개선함
+# ─────────────────────────────────────────────────────────────
+# 스마트폰 연결 페이지 (그대로 사용)
+# ─────────────────────────────────────────────────────────────
 HTML = """<!doctype html>
 <meta charset="utf-8">
 <title>카메라 연결</title>
@@ -120,159 +98,206 @@ HTML = """<!doctype html>
 </body>
 """
 
-class VideoCallbackTrack(MediaStreamTrack):
-    """비디오 프레임을 비동기 큐로 전달하는 트랙 (지연 최소화)"""
-    kind = "video"
-    
-    def __init__(self, track):
-        super().__init__()
-        self.track = track
+# ─────────────────────────────────────────────────────────────
+# API: 콜백 등록 & 결과 저장
+# ─────────────────────────────────────────────────────────────
+def set_frame_callback(callback):
+    """외부에서 프레임 처리 콜백 등록: async def f(img_bgr: np.ndarray) -> Optional[np.ndarray]"""
+    global frame_callback
+    frame_callback = callback
 
-    async def recv(self):
-        global frame_bus, last_frame_time
-        
-        frame = await self.track.recv()
-        current_time = time.time()
-        last_frame_time = current_time
-        
-        # 즉시 디코드 후 큐에 넣기 (논블로킹)
+async def store_processed_frame(frame):
+    """처리된 프레임 저장 + JPEG 바이트 캐시 업데이트"""
+    global processed_frame, last_processed_time, _cached_jpeg, _cached_jpeg_ts
+    async with processed_frame_lock:
+        if frame is None:
+            return
+        processed_frame = frame  # 콜백에서 새 버퍼를 반환한다고 가정
+        last_processed_time = time.time()
+        # 결과 JPEG 캐시(요청 때마다 재인코딩 방지)
+        ok, buf = cv2.imencode('.jpg', processed_frame,
+                               [cv2.IMWRITE_JPEG_QUALITY, 85, cv2.IMWRITE_JPEG_OPTIMIZE, 1])
+        if ok:
+            _cached_jpeg = buf.tobytes()
+            _cached_jpeg_ts = last_processed_time
+
+# ─────────────────────────────────────────────────────────────
+# 프레임 소비 루프: VideoFrame -> (여기서만) ndarray 디코딩 1회 -> 콜백
+# ─────────────────────────────────────────────────────────────
+async def _consume_and_call():
+    """frame_bus에서 VideoFrame을 꺼내 콜백을 단 1개만 실행(세마포어)"""
+    global frame_bus, frame_callback
+    assert frame_bus is not None
+
+    while True:
         try:
-            img = frame.to_ndarray(format="bgr24")
-            
-            # 최신 프레임만 유지 (논블로킹)
-            if frame_bus is not None:
-                try:
-                    if frame_bus.full():
-                        frame_bus.get_nowait()  # 오래된 것 버림
-                    frame_bus.put_nowait(img.copy()) # 메모리 안정성 확보
-                except asyncio.QueueFull:
-                    pass  # 큐가 가득 차면 그냥 버림
-                except Exception as e:
-                    logger.error(f"Frame bus error: {e}")
-                    
-        except Exception as e:
-            logger.error(f"Frame decode error: {e}")
-        
-        # 즉시 원본 프레임 반환 (지연 없음)
-        return frame
+            vf: VideoFrame = await frame_bus.get()
 
+            # 콜백이 없으면 스킵
+            if frame_callback is None:
+                continue
+
+            # 콜백 실행 중이면 스킵(최신 1장 유지 전략; frame_bus maxsize=1)
+            if _callback_gate.locked():
+                continue
+
+            async with _callback_gate:
+                # 여기서 단 1회만 디코딩
+                img = vf.to_ndarray(format="bgr24")
+                try:
+                    out = await frame_callback(img)
+                    await store_processed_frame(out if out is not None else img)
+                except Exception as e:
+                    logger.error(f"Frame callback error: {e}")
+                    # 실패시 원본 송출
+                    await store_processed_frame(img)
+
+        except Exception as e:
+            logger.error(f"Frame consumer error: {e}")
+
+# ─────────────────────────────────────────────────────────────
+# HTTP 핸들러
+# ─────────────────────────────────────────────────────────────
 async def index(request):
     return web.Response(content_type="text/html", text=HTML)
 
 async def get_android_frame(request):
-    """Streamlit용 처리된 프레임 반환 (비동기 버전)"""
-    global processed_frame, last_processed_time
-    
+    """Streamlit 등에서 최신 처리 이미지를 가져감 (JPEG 캐시 사용)"""
+    global processed_frame, last_processed_time, _empty_jpeg, _cached_jpeg
+
+    # 최근 3초 이내 결과가 있으면 캐시된 JPEG 반환
     async with processed_frame_lock:
-        if processed_frame is not None:
-            # 프레임이 너무 오래되지 않았는지 확인 (3초 이내)
-            if (time.time() - last_processed_time) < 3.0:
-                try:
-                    encode_params = [cv2.IMWRITE_JPEG_QUALITY, 85, cv2.IMWRITE_JPEG_OPTIMIZE, 1]
-                    success, buffer = cv2.imencode('.jpg', processed_frame, encode_params)
-                    if success:
-                        return web.Response(
-                            body=buffer.tobytes(),
-                            content_type='image/jpeg',
-                            headers={
-                                'Cache-Control': 'no-cache, no-store, must-revalidate',
-                                'Pragma': 'no-cache',
-                                'Expires': '0'
-                            }
-                        )
-                except Exception as e:
-                    logger.error(f"Frame encoding error: {e}")
-    
-    # streamlit에서 side_view 연결 안 됐을 때 보여줄 이미지
-    empty_img = np.zeros((480, 640, 3), dtype=np.uint8)
-    cv2.putText(empty_img, "Connecting...", (240, 240), 
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-    success, buffer = cv2.imencode('.jpg', empty_img)
-    return web.Response(body=buffer.tobytes(), content_type='image/jpeg')
+        fresh = processed_frame is not None and (time.time() - last_processed_time) < 3.0
+        if fresh and _cached_jpeg is not None:
+            return web.Response(
+                body=_cached_jpeg,
+                content_type='image/jpeg',
+                headers={'Cache-Control': 'no-cache, no-store, must-revalidate',
+                         'Pragma': 'no-cache', 'Expires': '0'}
+            )
+
+    # 연결 전: "Connecting..." 화면을 전역 1회 생성/재사용
+    if _empty_jpeg is None:
+        empty_img = np.zeros((480, 640, 3), dtype=np.uint8)
+        cv2.putText(empty_img, "Connecting...", (160, 260),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2, cv2.LINE_AA)
+        ok, buf = cv2.imencode('.jpg', empty_img, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        if ok:
+            # 전역에 캐시
+            globals()['_empty_jpeg'] = buf.tobytes()
+
+    return web.Response(body=_empty_jpeg, content_type='image/jpeg')
 
 async def get_android_status(request):
-    """연결 상태 정보"""
-    global last_frame_time, processed_frame, last_processed_time
-    
+    """연결 상태/지표"""
+    global last_frame_time, processed_frame, last_processed_time, frame_callback
     current_time = time.time()
     frame_age = (current_time - last_frame_time) * 1000 if last_frame_time > 0 else 999
     processed_age = (current_time - last_processed_time) * 1000 if last_processed_time > 0 else 999
-    
+
     status = {
-        "connected": last_frame_time > 0 and frame_age < 5000,  # 5초 이내
+        "connected": last_frame_time > 0 and frame_age < 5000,  # 5초 이내 프레임 수신
         "active_connections": len(pcs),
         "last_frame_age_ms": round(frame_age, 1),
         "has_processed_frame": processed_frame is not None,
         "processed_frame_age_ms": round(processed_age, 1),
         "callback_registered": frame_callback is not None
     }
-    
-    return web.Response(
-        content_type="application/json",
-        text=json.dumps(status)
-    )
+    return web.Response(content_type="application/json", text=json.dumps(status))
 
+# ─────────────────────────────────────────────────────────────
+# WebRTC 오퍼/트랙 처리 (루프백 송신/녹화 제거, 리더 태스크로 대체)
+# ─────────────────────────────────────────────────────────────
 async def offer(request):
-    """WebRTC 연결"""
+    """WebRTC 연결 핸드셋"""
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
-    config = RTCConfiguration(
-        iceServers=[RTCIceServer(urls=["stun:stun.l.google.com:19302"])]
-    )
-
+    config = RTCConfiguration(iceServers=[RTCIceServer(urls=["stun:stun.l.google.com:19302"])])
     pc = RTCPeerConnection(config)
     pcs.add(pc)
     pc_id = f"PeerConnection({uuid.uuid4()})"
-    
-    def log_info(msg, *args): 
-        logger.info(pc_id + " " + msg, *args)
-    
-    log_info("Created for %s", request.remote)
 
-    recorder = MediaBlackhole()  # 녹화 기능 제거로 단순화
+    def log_info(msg, *args):
+        logger.info(pc_id + " " + msg, *args)
+
+    log_info("Created for %s", request.remote)
 
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
         log_info("Connection state is %s", pc.connectionState)
-        if pc.connectionState == "failed":
+        if pc.connectionState in ("failed", "closed", "disconnected"):
+            # 리더 태스크 정리
+            t = pc_reader_tasks.pop(pc_id, None)
+            if t:
+                t.cancel()
             await pc.close()
             pcs.discard(pc)
 
     @pc.on("track")
     def on_track(track):
         log_info("Track %s received", track.kind)
-        
-        if track.kind == "video":
-            pc.addTrack(VideoCallbackTrack(relay.subscribe(track)))
-            recorder.addTrack(relay.subscribe(track))
 
-        @track.on("ended")
-        async def on_ended():
-            log_info("Track %s ended", track.kind)
-            await recorder.stop()
+        if track.kind == "video":
+            # 루프백 송신/녹화 제거
+            # pc.addTrack(VideoCallbackTrack(relay.subscribe(track)))  # 제거됨
+            # recorder.addTrack(relay.subscribe(track))                # 제거됨
+
+            subscribed = relay.subscribe(track)
+
+            async def reader():
+                global frame_bus, last_frame_time
+                try:
+                    while True:
+                        vf: VideoFrame = await subscribed.recv()
+                        last_frame_time = time.time()
+                        if frame_bus is not None:
+                            # 최신 1장만 유지
+                            if frame_bus.full():
+                                try:
+                                    frame_bus.get_nowait()
+                                except Exception:
+                                    pass
+                            try:
+                                frame_bus.put_nowait(vf)  # VideoFrame 그대로
+                            except asyncio.QueueFull:
+                                pass
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logger.error(f"Video reader error: {e}")
+
+            task = asyncio.create_task(reader())
+            pc_reader_tasks[pc_id] = task
+
+            @track.on("ended")
+            async def on_ended():
+                log_info("Track %s ended", track.kind)
+                t = pc_reader_tasks.pop(pc_id, None)
+                if t:
+                    t.cancel()
 
     await pc.setRemoteDescription(offer)
-    await recorder.start()
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
-    
+
     return web.Response(
         content_type="application/json",
-        text=json.dumps({
-            "sdp": pc.localDescription.sdp, 
-            "type": pc.localDescription.type
-        }),
+        text=json.dumps({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}),
     )
 
+# ─────────────────────────────────────────────────────────────
+# 앱 라이프사이클
+# ─────────────────────────────────────────────────────────────
 async def on_startup(app):
     """앱 시작 시 frame_bus 생성 및 소비자 태스크 시작"""
     global frame_bus
-    frame_bus = asyncio.Queue(maxsize=1)  # 최신 1장만 유지
+    frame_bus = asyncio.Queue(maxsize=1)  # 최신 1장만 유지 (VideoFrame)
     app['consumer_task'] = asyncio.create_task(_consume_and_call())
 
 async def on_cleanup(app):
-    """앱 종료 시 소비자 태스크 취소"""
+    """앱 종료 시 소비자/리더 태스크 취소"""
+    # 소비자 태스크 취소
     task = app.get('consumer_task')
     if task:
         task.cancel()
@@ -281,28 +306,42 @@ async def on_cleanup(app):
         except asyncio.CancelledError:
             pass
 
+    # 리더 태스크 전부 취소
+    for t in list(pc_reader_tasks.values()):
+        t.cancel()
+    pc_reader_tasks.clear()
+
 async def on_shutdown(app):
-    await asyncio.gather(*[pc.close() for pc in pcs])
+    # 열린 pc 모두 닫기
+    await asyncio.gather(*[pc.close() for pc in pcs], return_exceptions=True)
     pcs.clear()
 
+# ─────────────────────────────────────────────────────────────
+# 앱/서버 생성 & 실행
+# ─────────────────────────────────────────────────────────────
 def create_app():
-    """웹 애플리케이션 생성"""
     app = web.Application()
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     app.on_shutdown.append(on_shutdown)
-    
+
     app.router.add_get("/", index)
-    app.router.add_get("/android/frame", get_android_frame)  # Streamlit 듀얼 스트리밍을 위해 처리된 이미지 받아옴
-    app.router.add_get("/android/status", get_android_status)  #Streamlit 듀얼 스트리밍을 위해 처리된 상태 받아옴
+    app.router.add_get("/android/frame", get_android_frame)
+    app.router.add_get("/android/status", get_android_status)
     app.router.add_post("/offer", offer)
-    
     return app
 
 def run_server(host="0.0.0.0", port=8080):
-    """서버 실행 함수"""
     logging.basicConfig(level=logging.WARNING)
-    
     app = create_app()
-    
     web.run_app(app, access_log=None, host=host, port=port, ssl_context=None)
+
+# 사용 예시:
+# if __name__ == "__main__":
+#     # 예시 콜백 등록
+#     async def demo_cb(img):
+#         out = img.copy()
+#         cv2.putText(out, "OK", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2, cv2.LINE_AA)
+#         return out
+#     set_frame_callback(demo_cb)
+#     run_server()
