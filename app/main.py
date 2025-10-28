@@ -484,6 +484,7 @@ def main():
                 if "시작됨" in front_result and "성공적으로" in side_result:  # 두 결과 문자열에 '성공적으로' / '시작됨'이 들어있으면 성공
                     st.session_state.prev_bad_flag = False
                     st.session_state.last_bad_alert_ts = 0.0
+                    st.session_state.score = 35
                     
                     st.session_state.streaming = True # 상태 전환 후 st.rerun으로 페이지 새로고침 시켜 스트리밍 루프 표시 영역으로 이동
                     message_placeholder.success("듀얼 스트리밍이 성공적으로 시작되었습니다!")
@@ -532,7 +533,10 @@ def main():
         # ────────────────────────────────
         with col_option:
             st.markdown("### Front View 옵션")
-
+            st.markdown("### 상태")
+            score_placeholder = st.empty()
+            # 최초 표시
+            score_placeholder.write(f"현재 점수: {st.session_state.get('score', 35)} / 35")
             # ----- 옵션 설정 -----
             with st.container():
                 st.markdown("#### 옵션 설정")
@@ -622,6 +626,7 @@ def main():
             with stream_manager.bad_posture_lock:
                 cur_bad = bool(stream_manager.bad_posture_flag)
             now = time.time()
+            prev = bool(st.session_state.get('prev_bad_flag', False))
 
             # ⭐ 디버깅 로그
             if cur_bad:
@@ -631,6 +636,10 @@ def main():
             if (not st.session_state.prev_bad_flag) and cur_bad and \
             (now - st.session_state.last_bad_alert_ts >= BAD_ALERT_COOL_S):
                 print("[DEBUG] ✅ Alert triggered!")  # 이게 출력되는지 확인
+                # 점수 차감
+                if "score" in st.session_state:
+                    st.session_state.score = max(0, st.session_state.score - 1)  # 최소 0점까지
+                    score_placeholder.write(f"현재 얼굴 기울기 점수: {st.session_state.score} / 35")
                 st.toast("⚠️ 5초 이상 고개 기울기 감지! 바르게 앉으세요.")
 
 
@@ -662,7 +671,7 @@ def main():
 
                     const voices = await waitVoices();
 
-                    // 3) Edge에서 흔한 한국어 보이스 후보들
+                    // 3) Edge에서 한국어 보이스 후보들
                     const preferredNames = [
                     "Microsoft InJoon Online (Natural)",  // Microsoft InJoon Online (Natural) - Korean (Korea)
                     "Microsoft SunHi Online (Natural)",   // Microsoft SunHi Online (Natural) - Korean (Korea)
@@ -696,8 +705,17 @@ def main():
 
 
                 st.session_state.last_bad_alert_ts = now
+                st.session_state.last_penalty_ts = now
 
-            # 이전 상태 갱신
+             # ── (2) 지속 감점 로직 (10초 마다 1점 차감) ──
+            PENALTY_INTERVAL_S = 10.0
+            if cur_bad and prev:  # 이미 나쁜 상태로 들어간 이후에만
+                if now - st.session_state.get('last_penalty_ts', now) >= PENALTY_INTERVAL_S:
+                    st.session_state.score = max(0, st.session_state.get('score', 35) - 1)
+                    st.session_state.last_penalty_ts = now
+                    st.toast(f"⏱ 지속 불량 자세 감지: -1점 (현재 {st.session_state.score}점)")
+                    score_placeholder.write(f"현재 얼굴 기울기 점수: {st.session_state.score} / 35")
+
             st.session_state.prev_bad_flag = cur_bad
 
 
