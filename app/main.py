@@ -114,6 +114,10 @@ class OptimizedDualStreamManager:
         self.side_process_times = []
         self.side_total_frames = 0
         
+        self.bad_posture_flag = False  # 불량 자세 플래그
+
+        self.bad_posture_lock = threading.Lock()  # 스레드 안전성
+
         # 미리 할당된 결합 버퍼
         ## 초기엔 세로 480px, 가로 1280px, 3채널임 -> 필요시 새 크기로 재할당 가능
         self.combined_buffer = np.zeros((480, 1280, 3), dtype=np.uint8)
@@ -164,7 +168,9 @@ class OptimizedDualStreamManager:
             
             # 논블로킹 AI 처리 (실패시 원본 사용)
             try:
-                processed_frame = self.front_analyzer.analyze_frame(frame)
+                processed_frame, bad_flag = self.front_analyzer.analyze_frame(frame)
+                with self.bad_posture_lock:
+                    self.bad_posture_flag = bad_flag
                 # 성공한 경우만 처리 시간 기록
                 process_time = (time.time() - process_start) * 1000  # ms 변환
                 self.front_process_times.append(process_time)
@@ -355,6 +361,106 @@ def main():
     st.title("기본 듀얼 스트리밍")                                 # 페이지 상단 타이틀
     st.markdown("**Front_View** + **Side_View** 실시간 스트리밍")  # 짧은 설명 문구
     
+    # ===== 알림/음성 패널: 탑 DOM에 "한 번만" 고정 주입 =====
+    from streamlit.components.v1 import html
+
+    html("""
+    <div id="notif-tts-panel" style="
+    position:fixed;right:16px;bottom:16px;z-index:99999;
+    background:#111;color:#eee;border:1px solid #333;border-radius:12px;
+    padding:10px 12px;font-size:14px;box-shadow:0 6px 20px rgba(0,0,0,.35)
+    ">
+    <div><b>알림 · 음성 테스트</b></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
+        <button id="btn-perm" style="margin:4px 6px 0 0;padding:6px 10px;border-radius:8px;border:0;cursor:pointer">권한 요청</button>
+        <button id="btn-noti" style="margin:4px 6px 0 0;padding:6px 10px;border-radius:8px;border:0;cursor:pointer">알림 팝업</button>
+        <button id="btn-tts"  style="margin:4px 6px 0 0;padding:6px 10px;border-radius:8px;border:0;cursor:pointer">TTS 읽기</button>
+    </div>
+    <div id="nt-log" style="margin-top:6px;opacity:.8;font-size:12px"></div>
+    </div>
+
+    <script>
+    (function(){
+    const $ = (id)=>document.getElementById(id);
+    const log = (m)=>{ const el=$('nt-log'); if(el) el.textContent=m; console.log('[panel]', m); };
+
+    async function reqPerm(){
+        try{
+        const N = (window.top && window.top.Notification) || window.Notification;
+        if (!N) { log('이 브라우저는 알림 미지원'); return; }
+        const p = await (N.requestPermission ? N.requestPermission() : Promise.resolve(N.permission));
+        log('권한: ' + (p || N.permission));
+        }catch(e){ log('권한 에러: ' + e); }
+    }
+
+    function doNotify(title, body){
+        // 1) 최상위 DOM 우선
+        try{
+        const Ntop = (window.top && window.top.Notification);
+        if (Ntop) {
+            if (Ntop.permission !== 'granted' && Ntop.requestPermission) {
+            Ntop.requestPermission().then(()=>{ try{ new Ntop(title||'테스트', { body: body||'알림 팝업 테스트' }); }catch(e){} });
+            } else {
+            new Ntop(title||'테스트', { body: body||'알림 팝업 테스트' });
+            }
+            log('알림 시도 OK (top)');
+            return;
+        }
+        }catch(e){ /* fall through */ }
+
+        // 2) 폴백: iframe 내에서 직접
+        try{
+        const N = window.Notification;
+        if (!N) { log('알림 미지원'); return; }
+        if (N.permission !== 'granted' && N.requestPermission) {
+            N.requestPermission().then((p)=>{ if (p==='granted') { try{ new N(title||'테스트', { body: body||'알림 팝업 테스트' }); }catch(e){} } });
+        } else {
+            new N(title||'테스트', { body: body||'알림 팝업 테스트' });
+        }
+        log('알림 시도 OK (iframe)');
+        }catch(e){
+        log('알림 오류: ' + e);
+        alert('알림이 차단되어 있을 수 있어요. localhost에서, 사이트 권한 "알림 허용"을 확인해 주세요.');
+        }
+    }
+
+    function doTTS(text){
+        // 1) 최상위의 speechSynthesis 우선
+        try{
+        const Stop = (window.top && window.top.speechSynthesis) || null;
+        const Utop  = (window.top && window.top.SpeechSynthesisUtterance) || null;
+        if (Stop && Utop) {
+            Stop.cancel();
+            Stop.speak(new Utop(text || 'TTS 테스트입니다.'));
+            log('TTS 시도 OK (top)');
+            return;
+        }
+        }catch(e){ /* fall through */ }
+
+        // 2) 폴백: iframe 내부
+        try{
+        if (!('speechSynthesis' in window)) { log('TTS 미지원'); return; }
+        const u = new SpeechSynthesisUtterance(text || 'TTS 테스트입니다.');
+        speechSynthesis.cancel();
+        speechSynthesis.speak(u);
+        log('TTS 시도 OK (iframe)');
+        }catch(e){ log('TTS 오류: ' + e); }
+    }
+
+    $('btn-perm').onclick = reqPerm;
+    $('btn-noti').onclick = ()=>doNotify('스트림릿 알림', '이 팝업이 보이면 OK');
+    $('btn-tts').onclick  = ()=>doTTS('T T S 테스트입니다. 여러 번 눌러도 계속 읽힙니다.');
+
+    log('Notification:' + (('Notification' in window)||(window.top && !!window.top.Notification)) +
+        ' perm:' + ((window.Notification && window.Notification.permission) || 'n/a') +
+        ' | speechSynthesis:' + (('speechSynthesis' in window)||(window.top && !!window.top.speechSynthesis)) +
+        ' | protocol:' + location.protocol);
+    })();
+    </script>
+    """, height=190)
+
+
+
     # 위에서 정의한 캐시된 OptimizedDualStreamManager 객체를 가져옴
     # -> 이 객체가 실제로 카메라 켜고, 서버 띄우고, 프레임 버퍼 관리
     stream_manager = get_optimized_stream_manager(port)
@@ -376,6 +482,9 @@ def main():
                 side_result = stream_manager.start_side_view()   # run.py 서버 프로세스 + HTTP 클라이언트 스레드 실행
                 
                 if "시작됨" in front_result and "성공적으로" in side_result:  # 두 결과 문자열에 '성공적으로' / '시작됨'이 들어있으면 성공
+                    st.session_state.prev_bad_flag = False
+                    st.session_state.last_bad_alert_ts = 0.0
+                    
                     st.session_state.streaming = True # 상태 전환 후 st.rerun으로 페이지 새로고침 시켜 스트리밍 루프 표시 영역으로 이동
                     message_placeholder.success("듀얼 스트리밍이 성공적으로 시작되었습니다!")
                     st.rerun()
@@ -393,6 +502,13 @@ def main():
         # 현재 세션의 상태를 간단한 텍스트로 보여줌
         st.write(f"상태: {'실행 중' if st.session_state.streaming else '정지'}")
     
+    # 알림 엣지 트리거/쿨다운 상태
+    if 'prev_bad_flag' not in st.session_state:
+        st.session_state.prev_bad_flag = False
+    if 'last_bad_alert_ts' not in st.session_state:
+        st.session_state.last_bad_alert_ts = 0.0
+    BAD_ALERT_COOL_S = 3.0  # 알림 연속 방지를 위한 쿨다운(초)
+
     # ────────────────────────────────
     # 스트리밍 표시
     # ────────────────────────────────
@@ -409,6 +525,7 @@ def main():
         # 첫 프레임 때만 이미지 객체 생성, 1006 수정
         front_img = None
         side_img = None
+
 
         # ────────────────────────────────
         # Front View 옵션 제어 + 상태 요약 (한 열에 세로 정렬)
@@ -500,7 +617,90 @@ def main():
                     side_img.image(side_rgb, channels="RGB", width=480)
             else:
                 side_placeholder.text("Side AI Loading...")
-            
+
+            # 스트리밍 루프 내부 (프레임 렌더 뒤, sleep 전에 배치)
+            with stream_manager.bad_posture_lock:
+                cur_bad = bool(stream_manager.bad_posture_flag)
+            now = time.time()
+
+            # ⭐ 디버깅 로그
+            if cur_bad:
+                print(f"[DEBUG] Bad posture detected! prev={st.session_state.prev_bad_flag}, "
+                    f"cooldown={(now - st.session_state.last_bad_alert_ts):.1f}s")
+
+            if (not st.session_state.prev_bad_flag) and cur_bad and \
+            (now - st.session_state.last_bad_alert_ts >= BAD_ALERT_COOL_S):
+                print("[DEBUG] ✅ Alert triggered!")  # 이게 출력되는지 확인
+                st.toast("⚠️ 5초 이상 고개 기울기 감지! 바르게 앉으세요.")
+
+
+                # 브라우저 TTS
+                st.components.v1.html("""
+                <script>
+                (async function(){
+                try{
+                    // 1) synth를 하나로 통일 (top 우선)
+                    const synth = (window.top && window.top.speechSynthesis) || window.speechSynthesis;
+                    const U = (window.top && window.top.SpeechSynthesisUtterance) || window.SpeechSynthesisUtterance;
+
+                    // 2) voices 로드 대기 (일부 브라우저는 초기엔 빈 배열)
+                    const waitVoices = () => new Promise(resolve => {
+                    const tryGet = () => {
+                        const v = synth.getVoices();
+                        if (v && v.length) resolve(v);
+                        else {
+                        synth.onvoiceschanged = () => resolve(synth.getVoices());
+                        // 안전망: 혹시 이벤트가 안 오면 타임아웃으로 한 번 더 시도
+                        setTimeout(() => {
+                            const v2 = synth.getVoices();
+                            if (v2 && v2.length) resolve(v2);
+                        }, 500);
+                        }
+                    };
+                    tryGet();
+                    });
+
+                    const voices = await waitVoices();
+
+                    // 3) Edge에서 흔한 한국어 보이스 후보들
+                    const preferredNames = [
+                    "Microsoft InJoon Online (Natural)",  // Microsoft InJoon Online (Natural) - Korean (Korea)
+                    "Microsoft SunHi Online (Natural)",   // Microsoft SunHi Online (Natural) - Korean (Korea)
+                    "Korean"   // 넓게 매칭 (환경별 이름 편차 대비)
+                    ];
+
+                    // 4) 우선순위: 이름 일부 매칭 → 언어 ko-* → 첫 번째
+                    let v =
+                    voices.find(x => preferredNames.some(p => x.name.includes(p))) ||
+                    voices.find(x => x.lang && x.lang.toLowerCase().startsWith("ko")) ||
+                    voices[0];
+
+                    // 디버그: 어떤 보이스가 선택됐는지 확인
+                    console.log("[TTS] voices:", voices.map(x => ({name:x.name, lang:x.lang})));
+                    console.log("[TTS] picked:", v ? {name:v.name, lang:v.lang} : null);
+
+                    // 5) 발화
+                    const u = new U("5초 이상 고개가 틀어졌습니다. 바르게 앉으세요.");
+                    u.lang = "ko-KR";   // 언어 힌트
+                    if (v) u.voice = v;
+                    u.rate = 1.3;       // 속도 (0.5~2.0)
+                    u.pitch = 1.2;      // 톤 (0~2)
+                    synth.cancel();
+                    synth.speak(u);
+                }catch(e){
+                    console.error("[TTS] error:", e);
+                }
+                })();
+                </script>
+                """, height=0)
+
+
+                st.session_state.last_bad_alert_ts = now
+
+            # 이전 상태 갱신
+            st.session_state.prev_bad_flag = cur_bad
+
+
             # 살~짝 sleep으로 CPU 양보
             time.sleep(0.001)    
         
