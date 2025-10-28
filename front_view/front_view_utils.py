@@ -32,8 +32,8 @@ class FrontViewAnalyzer:
 
         # 설정값 (원 코드 기반)
         self.BASE_EAR_THRESHOLD = 0.20
-        self.BLINK_THRESHOLD_PER_WIN = 20
-        self.BLINK_WINDOW_SEC = 60
+        self.BLINK_THRESHOLD_PER_WIN = 60
+        self.BLINK_WINDOW_SEC = 180
         self.MIN_OPEN_FRAMES = 1
 
         # 정면 수평 판단 임계값
@@ -45,6 +45,17 @@ class FrontViewAnalyzer:
         self.X_THR_RATIO_NOSE = 0.1
         self.MIN_PX_THR = 2.0
         self.EMA_ALPHA = 0.2
+
+
+        # --- 자동 알림(TTS) 상태 ---
+        self._last_alert_ts = 0.0      # 마지막 경고 시각(ms)
+        self._alert_cool_ms = 2000     # 경고 쿨타임(ms) - 2초
+        self.alert_event = None        # 일회성 이벤트: {"title","body","ts"}
+        self.bad_grace_s = 2.0     # 허용 유예 시간 (초)
+        self._bad_last_ts = None   # 마지막으로 '불량'이 관측된 시각
+        self.bad_posture_start = None   # 불량 시작 시각
+        self.bad_posture_flag = False   # 5초 이상 지속 여부
+
 
         # 상태값 초기화
         self.reset_state()
@@ -666,6 +677,7 @@ class FrontViewAnalyzer:
         title = "Head Level" if any_ok else "Head Tilted" if any_ok is not None else "Detecting..."
         title_color = (0, 200, 0) if any_ok else ((0, 0, 230) if any_ok is not None else (200, 200, 200))
         self.metrics_lines.append((title, title_color))
+        
 
         # 깜빡임 정보 요약 (윈도우 누적) → 패널에만 넣기 (영상 위 텍스트 출력 제거)
         now = time.time()
@@ -686,10 +698,44 @@ class FrontViewAnalyzer:
         # 상단에 원본 프레임 붙이기
         canvas[:h, :w] = image
 
-        self._draw_panel(image, self.metrics_lines, anchor='tl', margin=18, alpha=0.35)    
         self._flush_overlay(image)
+        self._draw_panel(image, self.metrics_lines, anchor='tl', margin=18, alpha=0.35)    
+        
 
-        return image
+        # posture 상태 판별
+        need_alert = (any_ok is not None) and (not bool(any_ok))
+        print(f"[FrontView] any_ok={any_ok}, need_alert={need_alert}, ...") # 디버그용
+
+        #now = time.time()
+        if need_alert:
+            if self.bad_posture_start is None:
+                self.bad_posture_start = now
+            self._bad_last_ts = now
+        else:
+            # 미검출(None) 또는 잠깐 정상(False)이라도, 유예 시간 안이면 유지
+            if self.bad_posture_start is not None and self._bad_last_ts is not None:
+                if (now - self._bad_last_ts) <= self.bad_grace_s:
+                    pass  # 유지
+                else:
+                    self.bad_posture_start = None
+            else:
+                self.bad_posture_start = None
+
+        # 최종 플래그
+        self.bad_posture_flag = (
+            self.bad_posture_start is not None and (now - self.bad_posture_start) >= 5.0
+        )
+
+        duration = (now - self.bad_posture_start) if self.bad_posture_start else 0
+        self.bad_posture_flag = (duration >= 5.0)
+
+        # 디버그 출력
+        if self.bad_posture_flag:
+            print(f"[FrontView] Bad posture flag=True, duration={(now - self.bad_posture_start):.1f}s")
+
+        return image, self.bad_posture_flag
+
+
     '''
         # --- HUD 표시용 라인 구성 ---
         extra = [
