@@ -118,7 +118,9 @@ class OptimizedDualStreamManager:
         ## 초기엔 세로 480px, 가로 1280px, 3채널임 -> 필요시 새 크기로 재할당 가능
         self.combined_buffer = np.zeros((480, 1280, 3), dtype=np.uint8)
 
-        print(f"Side view 포트는 {port}입니다!")  # 포트 정보 출력
+        # front_view 생성자 함수 변수 추가 - 1031
+        self.bad_posture_flag = False  # 불량 자세 플래그
+        self.bad_posture_lock = threading.Lock()  # 스레드 안전성
 
     def start_front_view(self):
         """웹캠 기반 Front View 시작 (최적화)"""
@@ -164,7 +166,9 @@ class OptimizedDualStreamManager:
             
             # 논블로킹 AI 처리 (실패시 원본 사용)
             try:
-                processed_frame = self.front_analyzer.analyze_frame(frame)
+                processed_frame, bad_flag = self.front_analyzer.analyze_frame(frame)
+                with self.bad_posture_lock:
+                    self.bad_posture_flag = bad_flag
                 # 성공한 경우만 처리 시간 기록
                 process_time = (time.time() - process_start) * 1000  # ms 변환
                 self.front_process_times.append(process_time)
@@ -347,14 +351,22 @@ def main():
         layout="wide"                               # 페이지 레이아웃 (가로 폭 전체를 사용하는 UI 모드)
     )
 
-    # 스트리밍 상태 초기화를 맨 위로 이동
-    # 처음 페이지 열었을 때 '스트리밍 꺼져 있음(False)' 상태로 초기화
+    # 세션 상태 초기화 (분석 관련 추가) - 1021
     if 'streaming' not in st.session_state:
         st.session_state.streaming = False
+    if 'analysis_active' not in st.session_state:
+        st.session_state.analysis_active = False  # 분석 진행 여부
+    if 'analysis_start_time' not in st.session_state:
+        st.session_state.analysis_start_time = None  # 분석 시작 시간
+    if 'analysis_duration' not in st.session_state:
+        st.session_state.analysis_duration = 10  # 실행 확인을 위해 10초로 테스트
+    if 'show_report' not in st.session_state: 
+        st.session_state.show_report = False  # 리포트 화면 표시 여부
     
-    st.title("기본 듀얼 스트리밍")                                 # 페이지 상단 타이틀
-    st.markdown("**Front_View** + **Side_View** 실시간 스트리밍")  # 짧은 설명 문구
-    
+    st.title("바르게 살자 !")                                                             # 페이지 상단 타이틀
+    st.markdown("안녕하세요! 2025 D&X:W Conference Tech_CV팀 부스에 오신 걸 환영합니다 😊")  # 짧은 설명 문구
+    st.markdown("<br><br>", unsafe_allow_html=True)  # 2줄 공백
+
     # 위에서 정의한 캐시된 OptimizedDualStreamManager 객체를 가져옴
     # -> 이 객체가 실제로 카메라 켜고, 서버 띄우고, 프레임 버퍼 관리
     stream_manager = get_optimized_stream_manager(port)
@@ -362,9 +374,7 @@ def main():
     # ────────────────────────────────
     # 컨트롤 패널
     # ────────────────────────────────
-    st.markdown("### 제어판")
     col1, col2 = st.columns(2) # col1은 버튼, col2는 상태 표시 텍스트
-    
     message_placeholder = st.empty() # 알림 메시지를 임시로 띄울 수 있는 공간
     
     # 시작/정지 버튼 제어
@@ -376,6 +386,9 @@ def main():
                 side_result = stream_manager.start_side_view()   # run.py 서버 프로세스 + HTTP 클라이언트 스레드 실행
                 
                 if "시작됨" in front_result and "성공적으로" in side_result:  # 두 결과 문자열에 '성공적으로' / '시작됨'이 들어있으면 성공
+                    st.session_state.prev_bad_flag = False
+                    st.session_state.last_bad_alert_ts = 0.0
+
                     st.session_state.streaming = True # 상태 전환 후 st.rerun으로 페이지 새로고침 시켜 스트리밍 루프 표시 영역으로 이동
                     message_placeholder.success("듀얼 스트리밍이 성공적으로 시작되었습니다!")
                     st.rerun()
@@ -387,18 +400,84 @@ def main():
                 stream_manager.stop()
                 st.session_state.streaming = False
                 message_placeholder.warning("스트리밍 정지됨")
+                # 분석 상태 초기화를 위한 설정 - 1021
+                st.session_state.analysis_active = False
+                st.session_state.analysis_start_time = None
+                st.session_state.show_report = False
                 st.rerun()
     
     with col2:
         # 현재 세션의 상태를 간단한 텍스트로 보여줌
         st.write(f"상태: {'실행 중' if st.session_state.streaming else '정지'}")
     
+    # 알림 엣지 트리거/쿨다운 상태
+    if 'prev_bad_flag' not in st.session_state:
+        st.session_state.prev_bad_flag = False
+    if 'last_bad_alert_ts' not in st.session_state:
+        st.session_state.last_bad_alert_ts = 0.0
+    BAD_ALERT_COOL_S = 3.0  # 알림 연속 방지를 위한 쿨다운(초)
+    
     # ────────────────────────────────
     # 스트리밍 표시
     # ────────────────────────────────
     if st.session_state.streaming:
-        st.markdown("### Front_view + Side_view")  # 제목 표시
+        # 리포트 화면 표시 추가 (분석 완료 후) - 1021
+        if st.session_state.show_report:
+            st.markdown("## 🍀자세 분석 리포트")
+            st.success("3분간의 분석이 완료되었습니다! 분석 결과를 확인해보세요!")
+            
+            ## 눈깜빡임 리포트 추가 - 1026
+            st.markdown("---")
+            st.markdown("### 👀 눈 깜빡임 분석")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            blink_count = stream_manager.front_analyzer.blink_count
+            duration_minutes = st.session_state.analysis_duration / 60
+            blinks_per_minute = blink_count / duration_minutes if duration_minutes > 0 else 0
+            
+            with col1:
+                st.metric(label="총 깜빡임 수", value=f"{blink_count}회")
+            
+            with col2:
+                st.metric(label="분당 깜빡임", value=f"{blinks_per_minute:.1f}회/분")
+            
+            with col3:
+                st.markdown("##### 📊 분석 결과")
+                if blinks_per_minute >= 15:
+                    st.info("눈 깜빡임이 정상 범위입니다 :) \n\n1분에 15~20회/분 깜빡여야 눈의 피로를 줄일 수 있습니다!")
+                else:
+                    st.error("눈 깜빡임이 적습니다 :( \n\n1분에 15~20회/분 깜빡여야 눈의 피로를 줄일 수 있습니다!")
+            
+            # 새로운 분석 시작 버튼
+            if st.button("🔄 새로운 분석 시작", type="primary", use_container_width=True):
+                stream_manager.stop()
+                st.session_state.streaming = False
+                st.session_state.analysis_active = False
+                st.session_state.analysis_start_time = None
+                st.session_state.show_report = False
+                st.rerun()
+            return
         
+        st.markdown("### Front_view + Side_view")  # 제목 표시
+        st.markdown("다양한 옵션 버튼들을 통해 설정값을 조정해보세요 :) \n\n본인에게 맞는 바른 자세를 파악하신 후 '분석 시작' 버튼을 클릭하면 자세 분석이 시작됩니다!")
+       
+        # 분석 시작 버튼 추가 - 1021
+        button_area = st.empty()
+
+        if not st.session_state.analysis_active:
+            with button_area.container():
+                if st.button("⏰분석 시작 (3분)", type="primary", use_container_width=True):
+                    st.session_state.analysis_active = True
+                    st.session_state.analysis_start_time = time.time()
+                    
+                    ## 분석 시작하면 눈 깜빡임 리셋 - 1026
+                    stream_manager.front_analyzer.blink_count = 0
+                    stream_manager.front_analyzer.win_start = time.time()
+
+                    button_area.empty()
+                    st.rerun()
+
         # 한 행: Front / Side / 옵션+상태 (1009 수정)
         col_front, col_side, col_option = st.columns([1, 1, 1]) # 맨 오른쪽에 옵션+상태 배치
         
@@ -423,7 +502,7 @@ def main():
                 colA, colB = st.columns(2)
 
                 # 임계값 설정
-                if colA.button("Threshold 설정(RELAX1 < RELAX2 < Strict)", key="thr_btn_once"):
+                if colA.button("판독 감도 조절(RELAX1 < RELAX2 < Strict)", key="thr_btn_once"):
                     stream_manager.front_analyzer.cycle_threshold_profile(+1)
 
                 # keypoint 표시
@@ -469,11 +548,20 @@ def main():
                 st.metric("투명도", f"{analyzer.ALPHA:.1f}")
 
         # 실시간 스트리밍 루프
-        start_time = time.time()  
+        start_time = time.time()
 
         # 최대 100분(6000초)동안 루프를 돌며 stream_manager의 버퍼에서 최신 프레임을 읽어와 화면 갱신
         while st.session_state.streaming and (time.time() - start_time) < 6000:  ## 1006 수정
-            
+           # 3분 경과 시 리포트 화면으로 전환 - 1021
+            if st.session_state.analysis_active and st.session_state.analysis_start_time:
+                elapsed = time.time() - st.session_state.analysis_start_time
+                
+                if elapsed >= st.session_state.analysis_duration:
+                    st.session_state.analysis_active = False
+                    st.session_state.show_report = True  # 리포트 화면 표시
+                    stream_manager.stop()  # 스트리밍 중지
+                    st.rerun()
+
             # 프레임 가져오기 및 표시
             front_frame = stream_manager.get_front_frame()
             side_frame = stream_manager.get_side_frame()
@@ -501,11 +589,93 @@ def main():
             else:
                 side_placeholder.text("Side AI Loading...")
             
+             # 스트리밍 루프 내부 (프레임 렌더 뒤, sleep 전에 배치)
+            with stream_manager.bad_posture_lock:
+                cur_bad = bool(stream_manager.bad_posture_flag)
+            now = time.time()
+
+            # ⭐ 디버깅 로그
+            if cur_bad:
+                print(f"[DEBUG] Bad posture detected! prev={st.session_state.prev_bad_flag}, "
+                    f"cooldown={(now - st.session_state.last_bad_alert_ts):.1f}s")
+
+            if (not st.session_state.prev_bad_flag) and cur_bad and \
+            (now - st.session_state.last_bad_alert_ts >= BAD_ALERT_COOL_S):
+                print("[DEBUG] ✅ Alert triggered!")  # 이게 출력되는지 확인
+                st.toast("⚠️ 5초 이상 고개 기울기 감지! 바르게 앉으세요.")
+
+
+                # 브라우저 TTS
+                st.components.v1.html("""
+                <script>
+                (async function(){
+                try{
+                    // 1) synth를 하나로 통일 (top 우선)
+                    const synth = (window.top && window.top.speechSynthesis) || window.speechSynthesis;
+                    const U = (window.top && window.top.SpeechSynthesisUtterance) || window.SpeechSynthesisUtterance;
+
+                    // 2) voices 로드 대기 (일부 브라우저는 초기엔 빈 배열)
+                    const waitVoices = () => new Promise(resolve => {
+                    const tryGet = () => {
+                        const v = synth.getVoices();
+                        if (v && v.length) resolve(v);
+                        else {
+                        synth.onvoiceschanged = () => resolve(synth.getVoices());
+                        // 안전망: 혹시 이벤트가 안 오면 타임아웃으로 한 번 더 시도
+                        setTimeout(() => {
+                            const v2 = synth.getVoices();
+                            if (v2 && v2.length) resolve(v2);
+                        }, 500);
+                        }
+                    };
+                    tryGet();
+                    });
+
+                    const voices = await waitVoices();
+
+                    // 3) Edge에서 흔한 한국어 보이스 후보들
+                    const preferredNames = [
+                    "Microsoft InJoon Online (Natural)",  // Microsoft InJoon Online (Natural) - Korean (Korea)
+                    "Microsoft SunHi Online (Natural)",   // Microsoft SunHi Online (Natural) - Korean (Korea)
+                    "Korean"   // 넓게 매칭 (환경별 이름 편차 대비)
+                    ];
+
+                    // 4) 우선순위: 이름 일부 매칭 → 언어 ko-* → 첫 번째
+                    let v =
+                    voices.find(x => preferredNames.some(p => x.name.includes(p))) ||
+                    voices.find(x => x.lang && x.lang.toLowerCase().startsWith("ko")) ||
+                    voices[0];
+
+                    // 디버그: 어떤 보이스가 선택됐는지 확인
+                    console.log("[TTS] voices:", voices.map(x => ({name:x.name, lang:x.lang})));
+                    console.log("[TTS] picked:", v ? {name:v.name, lang:v.lang} : null);
+
+                    // 5) 발화
+                    const u = new U("5초 이상 고개가 틀어졌습니다. 바르게 앉으세요.");
+                    u.lang = "ko-KR";   // 언어 힌트
+                    if (v) u.voice = v;
+                    u.rate = 1.3;       // 속도 (0.5~2.0)
+                    u.pitch = 1.2;      // 톤 (0~2)
+                    synth.cancel();
+                    synth.speak(u);
+                }catch(e){
+                    console.error("[TTS] error:", e);
+                }
+                })();
+                </script>
+                """, height=0)
+
+
+                st.session_state.last_bad_alert_ts = now
+
+            # 이전 상태 갱신
+            st.session_state.prev_bad_flag = cur_bad
+
             # 살~짝 sleep으로 CPU 양보
             time.sleep(0.001)    
         
     else:
-        st.info("'듀얼 스트리밍 시작' 버튼을 클릭하세요.")
+        st.info("모든 준비가 완료되었다면, '듀얼 스트리밍 시작' 버튼을 클릭해주세요!")
 
 if __name__ == "__main__":
     main()
