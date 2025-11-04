@@ -10,6 +10,10 @@ import os
 import atexit
 from collections import deque
 import argparse
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+import io
+from datetime import datetime, timedelta
 
 # 명령행 인자 파싱 함수 추가
 def parse_args():
@@ -315,6 +319,106 @@ def get_optimized_stream_manager(_port):
         _global_stream_manager = OptimizedDualStreamManager(port=_port)
     return _global_stream_manager
 
+def plot_posture_graph(history):
+    """바른자세 점수 변화 그래프 - 초간단 버전"""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    try:
+        plt.rcParams['font.family'] = 'Malgun Gothic'
+        plt.rcParams['axes.unicode_minus'] = False
+    except:
+        plt.rcParams['axes.unicode_minus'] = False
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    posture_configs = [
+        {
+            'name': '고개 기울기',
+            'timestamps_key': 'head_timestamps',
+            'scores_key': 'head_scores',
+            'color': 'b',
+            'marker': 'o',
+            'edge_color': 'darkblue'
+        },
+        {
+            'name': '어깨수평',
+            'timestamps_key': 'shoulder_timestamps',
+            'scores_key': 'shoulder_scores',
+            'color': 'g',
+            'marker': 's',
+            'edge_color': 'darkgreen'
+        },
+        {
+            'name': '거북목',
+            'timestamps_key': 'neck_timestamps',
+            'scores_key': 'neck_scores',
+            'color': 'y',
+            'marker': '^',
+            'edge_color': 'gold'
+        },
+        {
+            'name': '굽은 허리',
+            'timestamps_key': 'spine_timestamps',
+            'scores_key': 'spine_scores',
+            'color': 'orange',
+            'marker': 'v',
+            'edge_color': 'darkorange'
+        },
+    ]
+    
+    for config in posture_configs:
+        timestamps = np.array(history.get(config['timestamps_key'], [0]))
+        scores = np.array(history.get(config['scores_key'], [50]))
+
+        if len(timestamps) > 0 and len(scores) > 0:
+            # 정렬 및 보간
+            order = np.argsort(timestamps)
+            timestamps = timestamps[order]
+            scores = scores[order]
+            interp_times = np.linspace(0, 180, 300)
+            interp_scores = np.interp(interp_times, timestamps, scores)
+
+            # 선 그리기
+            ax.plot(
+                interp_times,
+                interp_scores,
+                linestyle='-',
+                color=config['color'],
+                linewidth=2.5,
+                label=config['name'],
+                alpha=0.9
+            )
+            
+            # 30초 간격 위치에 마커만 찍기
+            marker_times = [0, 30, 60, 90, 120, 150, 180]
+            marker_scores = np.interp(marker_times, timestamps, scores)
+            
+            ax.plot(
+                marker_times, marker_scores,
+                linestyle='None',             
+                marker=config['marker'],      
+                color=config['color'],        
+                markersize=10,
+                markeredgecolor=config['edge_color'],
+                markeredgewidth=2
+            )
+    
+    ax.set_xlabel('시간 (초)', fontsize=13, fontweight='bold')
+    ax.set_ylabel('점수', fontsize=13, fontweight='bold')
+    ax.set_title('[자세 요약 그래프]', fontsize=15, fontweight='bold', pad=20)
+    ax.legend(loc='upper right', fontsize=11, frameon=True, shadow=True, fancybox=True)
+    ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.7)
+    ax.set_ylim([0, 60])
+    ax.set_xlim([0, 180])
+    ax.set_xticks([0, 30, 60, 90, 120, 150, 180])
+    ax.set_facecolor('#f8f9fa')
+    fig.patch.set_facecolor('white')
+    
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close()
+
 def main():
     args = parse_args()
     port = args.port
@@ -332,9 +436,21 @@ def main():
     if 'analysis_start_time' not in st.session_state:
         st.session_state.analysis_start_time = None
     if 'analysis_duration' not in st.session_state:
-        st.session_state.analysis_duration = 180  # 3분 = 180초
+        st.session_state.analysis_duration = 181  # 3분 = 180초
     if 'show_report' not in st.session_state: 
         st.session_state.show_report = False
+    if 'score_history' not in st.session_state: # 1104 수정
+        st.session_state.score_history = {
+            'head_timestamps': [0],      
+            'head_scores': [50],
+            'shoulder_timestamps': [0],  
+            'shoulder_scores': [50],
+            'neck_timestamps': [0],      
+            'neck_scores': [50],
+            'spine_timestamps': [0],     
+            'spine_scores': [50],
+            'start_time': time.time()
+        }
     
     st.title("바르게 살자 !")
     st.markdown("안녕하세요! 2025 D&X:W Conference Tech_CV팀 부스에 오신 걸 환영합니다 😊")
@@ -396,12 +512,49 @@ def main():
         if st.session_state.show_report:
             st.markdown("## 🍀자세 분석 리포트")
             st.success("3분간의 분석이 완료되었습니다! 분석 결과를 확인해보세요!")
-            
+
+            # 2열 구성: 왼쪽(그래프), 오른쪽(점수 요약)
+            col_left, col_right = st.columns([2, 1])
+
+            with col_left:
+                # 왼쪽에는 자세 변화 그래프
+                plot_posture_graph(st.session_state.score_history)
+
+            with col_right:
+                # 가운데 맞춤
+                st.markdown("""
+                    <div style="margin-top:120px;">
+                """, unsafe_allow_html=True)
+
+                st.markdown("### 📊 요약 점수")
+
+                # 정면 총점
+                front_total = (
+                    st.session_state.get("score", 50)
+                    + st.session_state.get("shoulder_score", 50)
+                )
+                st.metric("##### 정면 총점", f"{front_total} / 100")
+
+                # 측면 총점
+                side_total = (
+                    st.session_state.get("neck_score", 50)
+                    + st.session_state.get("spine_score", 50)
+                )
+                st.metric("##### 측면 총점", f"{side_total} / 100")
+
+                # 전체 총점 (정면 + 측면)
+                overall_total = front_total + side_total
+                st.metric("##### 전체 총점", f"{overall_total} / 200")
+                
+                # 점수 계산 안내
+                #st.info("최종 점수는 '(테트리스 점수) x (전체 자세 점수) x 1/100'으로 계산됩니다!")
             # 점수 표시
             st.markdown("---")
-            st.markdown("### 📊 자세 점수")
-            
-            col1, col2 = st.columns(2)
+            st.markdown("## 📊 자세 점수")
+
+            ## 정면
+            st.markdown("### 정면")
+            col1, col2, col3 = st.columns(3)
             
             with col1:
                 st.metric(label="얼굴 기울기 점수", value=f"{st.session_state.get('score', 50)} / 50")
@@ -420,6 +573,39 @@ def main():
                     st.warning("⚠️ 어깨 균형 개선이 필요합니다.")
                 else:
                     st.error("❌ 어깨 균형 교정이 필요합니다!")
+            
+            with col3:
+                # 🚩 정면 총 점수 계산
+                total_front_score = st.session_state.get('score', 50) + st.session_state.get('shoulder_score', 50)
+                st.metric(label="정면 총 점수", value=f"{total_front_score} / 100")
+
+            ## 측면
+            st.markdown("### 측면")
+            col4, col5, col6 = st.columns(3)
+
+            with col4:
+                neck_score = st.session_state.get('neck_score', 0)
+                st.metric(label="거북목 점수", value=f"{neck_score} / 50")
+                if neck_score >= 40:
+                    st.success("✅ 당신은 거북이가 아닙니다!")
+                elif neck_score >= 30:
+                    st.warning("⚠️ 거북목이 조금 있습니다. 곧 거북이가 될지도..? 🐢")
+                else:
+                    st.error("❌ 거북이님 안녕하세요! 🐢🐢")
+
+            with col5:
+                spine_score = st.session_state.get('spine_score', 0)
+                st.metric(label="굽은 허리 점수", value=f"{spine_score} / 50")
+                if spine_score >= 40:
+                    st.success("✅ 허리 곡선이 정상적입니다!")
+                elif spine_score >= 30:
+                    st.warning("⚠️ 허리가 다소 굽었습니다.")
+                else:
+                    st.error("❌ 허리 교정이 필요합니다!")
+
+            with col6:
+                total_side_score = neck_score + spine_score
+                st.metric(label="측면 총 점수", value=f"{total_side_score} / 100")
             
             # 눈깜빡임 리포트
             st.markdown("---")
@@ -472,6 +658,25 @@ def main():
                     # ⭐ 점수/상태 초기화 (고개 + 어깨)
                     st.session_state.score = 50
                     st.session_state.shoulder_score = 50
+                    
+                    # 측면 점수/상태 초기화
+                    st.session_state.neck_score = 50
+                    st.session_state.spine_score = 50
+                    st.session_state.prev_neck_sum = 0
+                    st.session_state.prev_spine_sum = 0
+
+                    # 그래프 히스토리 초기화 - 1104 수정
+                    st.session_state.score_history = {
+                        'head_timestamps': [0],      
+                        'head_scores': [50],
+                        'shoulder_timestamps': [0],  
+                        'shoulder_scores': [50],
+                        'neck_timestamps': [0],
+                        'neck_scores': [50],
+                        'spine_timestamps': [0],
+                        'spine_scores': [50],
+                        'start_time': time.time()
+                    }
 
                     st.session_state.prev_bad_flag = False
                     st.session_state.prev_shoulder_bad_flag = False
@@ -497,17 +702,43 @@ def main():
         
         front_placeholder = col_front.empty()
         side_placeholder = col_side.empty()
-        side_score_ph = col_option.empty()
-        side_score2_ph = col_option.empty()
-        side_fhp_ph = col_option.empty()
-        side_curve_ph = col_option.empty()
-
 
         # 정면 영상 아래 점수 박스
         front_score_box = col_front.container()
-        score_title_ph = front_score_box.markdown("### 📊 현재 점수")
-        head_score_ph = front_score_box.empty()
-        shoulder_score_ph = front_score_box.empty()
+
+        # metric 크기 조정용 CSS 추가
+        st.markdown("""
+            <style>
+            [data-testid="stMetricValue"] {
+                font-size: 22px !important;  /* 기본값은 약 36px */
+            }
+            [data-testid="stMetricLabel"] {
+                font-size: 14px !important;  /* 라벨 글자 */
+            }
+            </style>
+        """, unsafe_allow_html=True)
+
+        score_title_ph = front_score_box.markdown("#### 📊 현재 점수")
+
+        # 2열로 나눔 — 왼쪽: 정면 / 오른쪽: 측면
+        col_front_scores, col_side_scores = front_score_box.columns(2)
+
+        # 왼쪽 (정면)
+        with col_front_scores:
+            st.markdown("##### 🎯 정면")
+            head_score_ph = st.empty()
+            shoulder_score_ph = st.empty()
+            # 기존 점수 렌더 유지
+            head_score_ph.metric("얼굴 기울기", f"{st.session_state.get('score', 50)}/50")
+            shoulder_score_ph.metric("어깨 균형", f"{st.session_state.get('shoulder_score', 50)}/50")
+
+        # 오른쪽 (측면)
+        with col_side_scores:
+            st.markdown("##### 🎯 측면")
+            side_score_ph = st.empty()
+            side_score2_ph = st.empty()
+            #side_score_ph.metric("거북목", f"{m.get('neck_sum', 0)}/50")
+            #side_score2_ph.metric("굽은 허리", f"{m.get('spine_sum', 0)}/50")
 
         front_img = None
         side_img = None
@@ -557,9 +788,9 @@ def main():
             #score_placeholder2.metric("어깨 균형", f"{st.session_state.get('shoulder_score', 35)}/35")
 
             # 정면 점수 초기 렌더
-            score_title_ph.markdown("### 📊 현재 점수")
-            head_score_ph.metric("얼굴 기울기", f"{st.session_state.get('score', 50)}/50")
-            shoulder_score_ph.metric("어깨 균형", f"{st.session_state.get('shoulder_score', 50)}/50")
+            #score_title_ph.markdown("### 📊 현재 점수")
+            #head_score_ph.metric("얼굴 기울기", f"{st.session_state.get('score', 35)}/35")
+            #shoulder_score_ph.metric("어깨 균형", f"{st.session_state.get('shoulder_score', 35)}/35")
 
             # 상태 요약
             st.markdown("---")
@@ -585,6 +816,13 @@ def main():
                 elapsed = time.time() - st.session_state.analysis_start_time
                 
                 if elapsed >= st.session_state.analysis_duration:
+                    # 리포트 전환 직전 마지막 측면 점수 저장
+                    elapsed = time.time() - st.session_state.score_history['start_time']
+                    st.session_state.score_history['neck_timestamps'].append(elapsed)
+                    st.session_state.score_history['neck_scores'].append(st.session_state.get('neck_score', 0))
+                    st.session_state.score_history['spine_timestamps'].append(elapsed)
+                    st.session_state.score_history['spine_scores'].append(st.session_state.get('spine_score', 0))
+
                     st.session_state.analysis_active = False
                     st.session_state.show_report = True
                     stream_manager.stop()
@@ -625,6 +863,12 @@ def main():
             if (not prev) and cur_bad and (now - st.session_state.get('last_bad_alert_ts', 0.0) >= BAD_ALERT_COOL_S):
                 # 점수 차감
                 st.session_state.score = max(0, st.session_state.get('score', 50) - 1)
+
+                # 히스토리 업데이트 - 1104
+                elapsed = now - st.session_state.score_history['start_time']
+                st.session_state.score_history['head_timestamps'].append(elapsed)
+                st.session_state.score_history['head_scores'].append(st.session_state.score)
+
                 st.session_state.last_bad_alert_ts = now
                 st.session_state.last_penalty_ts = now
                 
@@ -653,12 +897,24 @@ def main():
             if cur_bad and prev:
                 if now - st.session_state.get('last_penalty_ts', now) >= PENALTY_INTERVAL_S:
                     st.session_state.score = max(0, st.session_state.get('score', 50) - 2)
+
+                    # 히스토리 업데이트 추가 - 1104
+                    elapsed = now - st.session_state.score_history['start_time']
+                    st.session_state.score_history['head_timestamps'].append(elapsed)
+                    st.session_state.score_history['head_scores'].append(st.session_state.score)
+
                     st.session_state.last_penalty_ts = now
                     st.toast(f"⏱ 지속 불량 자세: -2점 (현재 {st.session_state.score}점)")
             
             # ===== (3) 어깨 비대칭 알림 (False→True 전이) =====
             if (not prev_sh) and cur_shoulder_bad and (now - st.session_state.get('last_shoulder_alert_ts', 0.0) >= BAD_ALERT_COOL_S):
                 st.session_state.shoulder_score = max(0, st.session_state.get('shoulder_score', 50) - 2)
+                
+                # 히스토리 업데이트 추가 - 1106
+                elapsed = now - st.session_state.score_history['start_time']
+                st.session_state.score_history['shoulder_timestamps'].append(elapsed)
+                st.session_state.score_history['shoulder_scores'].append(st.session_state.shoulder_score)
+
                 st.session_state.last_shoulder_alert_ts = now
                 st.session_state.last_shoulder_penalty_ts = now
                 st.toast(f"⚠️ 어깨 비대칭 10초 지속: -2점 (현재 {st.session_state.shoulder_score}점)")
@@ -685,6 +941,12 @@ def main():
             if cur_shoulder_bad and prev_sh:
                 if now - st.session_state.get('last_shoulder_penalty_ts', now) >= PENALTY_INTERVAL_S:
                     st.session_state.shoulder_score = max(0, st.session_state.get('shoulder_score', 50) - 2)
+                    
+                    # 히스토리 업데이트 추가 - 1104
+                    elapsed = now - st.session_state.score_history['start_time']
+                    st.session_state.score_history['shoulder_timestamps'].append(elapsed)
+                    st.session_state.score_history['shoulder_scores'].append(st.session_state.shoulder_score)
+
                     st.session_state.last_shoulder_penalty_ts = now
                     st.toast(f"⏱ 어깨 비대칭 지속: -2점 (현재 {st.session_state.shoulder_score}점)")
             
@@ -697,21 +959,58 @@ def main():
             # 이전 상태 갱신
             st.session_state.prev_bad_flag = cur_bad
             st.session_state.prev_shoulder_bad_flag = cur_shoulder_bad
-            
+
             # 측면 점수 가져오기 (10Hz 이하 주기)
             SIDE_BASE = f"http://localhost:{stream_manager.side_port}"
+
+            # 분석 시작 직후 1초 동안 metrics 업데이트 잠시 무시
+            if st.session_state.analysis_active and (time.time() - st.session_state.analysis_start_time) < 1.0:
+                time.sleep(0.001)
+                continue
 
             if time.time() - st.session_state.get("last_side_metrics_ts", 0.0) >= 0.5:
                 try:
                     r = requests.get(f"{SIDE_BASE}/android/metrics", timeout=0.4)
                     if r.ok:
                         m = r.json()
-                        side_score_ph.metric("측면 점수(목)", f"{m.get('neck_sum', 0)}")
-                        side_score2_ph.metric("측면 점수(척추)", f"{m.get('spine_sum', 0)}")
-                        if m.get("fhp_deg") is not None:
-                            side_fhp_ph.write(f"FHP: {m['fhp_deg']:.1f}°")
-                        if m.get("curve_deg") is not None:
-                            side_curve_ph.write(f"Curve: {m['curve_deg']:.1f}°")
+                        
+                        # neck_sum, spine_sum 가져오기
+                        neck_sum = m.get("neck_sum", 0)
+                        spine_sum = m.get("spine_sum", 0)
+
+                        # 변화량(delta) 계산
+                        prev_neck_sum = st.session_state.get("prev_neck_sum", neck_sum)
+                        prev_spine_sum = st.session_state.get("prev_spine_sum", spine_sum)
+                        neck_delta = neck_sum - prev_neck_sum
+                        spine_delta = spine_sum - prev_spine_sum
+
+                        # 저장
+                        st.session_state.prev_neck_sum = neck_sum
+                        st.session_state.prev_spine_sum = spine_sum
+
+                        # 점수 부드럽게 감소 (누적합 → 변화량 기반)
+                        st.session_state.neck_score = max(0, st.session_state.neck_score - neck_delta * 0.5)
+                        st.session_state.spine_score = max(0, st.session_state.spine_score - spine_delta * 0.5)
+
+                        # 표시
+                        side_score_ph.metric("거북목", f"{st.session_state.neck_score} / 50")
+                        side_score2_ph.metric("굽은 허리", f"{st.session_state.spine_score} / 50")
+
+                        # metric에 표시
+                        side_score_ph.metric("거북목", f"{neck_score} / 50")
+                        side_score2_ph.metric("굽은 허리", f"{spine_score} / 50")
+                        #if m.get("fhp_deg") is not None:
+                            #side_fhp_ph.write(f"FHP: {m['fhp_deg']:.1f}°")
+                        #if m.get("curve_deg") is not None:
+                            #side_curve_ph.write(f"Curve: {m['curve_deg']:.1f}°")
+
+                        # 그래프 히스토리 추가
+                        elapsed = now - st.session_state.score_history['start_time']
+                        st.session_state.score_history['neck_timestamps'].append(elapsed)
+                        st.session_state.score_history['neck_scores'].append(neck_score)
+                        st.session_state.score_history['spine_timestamps'].append(elapsed)
+                        st.session_state.score_history['spine_scores'].append(spine_score)
+
                         st.session_state["last_side_metrics_ts"] = time.time()
                 except Exception as e:
                     print("[WARN] side metrics fetch failed:", e)
