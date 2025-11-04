@@ -5,6 +5,7 @@ from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay
 from aiortc import RTCConfiguration, RTCIceServer
 from av import VideoFrame
+import threading
 
 logger = logging.getLogger("webrtc")
 
@@ -25,6 +26,30 @@ processed_frame_lock = asyncio.Lock()
 last_frame_time = 0.0                   # 마지막 수신 프레임 시각
 last_processed_time = 0.0               # 마지막 처리 완료 시각
 
+# ─────────────────────────────────────────────────────────────
+# API: 지표 설정/조회
+# ─────────────────────────────────────────────────────────────
+metrics_lock = threading.Lock()
+latest_metrics = {
+    "fhp_deg": None,
+    "curve_deg": None,
+    "neck_sum": 0,
+    "spine_sum": 0,
+    "updated_ts": 0.0
+}
+
+def set_metrics(mdict: dict):
+    # 워커 스레드/이벤트 루프 상관없이 그냥 호출 가능
+    with metrics_lock:
+        latest_metrics.update(mdict)
+        latest_metrics["updated_ts"] = time.time()
+
+async def get_metrics(request):
+    # aiohttp 핸들러에서는 잠깐만 Lock 잡고 JSON 만들면 됨
+    with metrics_lock:
+        payload = json.dumps(latest_metrics, ensure_ascii=False, default=float)
+    return web.Response(content_type="application/json", text=payload)
+# ─────────────────────────────────────────────────────────────
 # JPEG 캐시 (결과/빈화면)
 _empty_jpeg = None
 _cached_jpeg = None
@@ -329,6 +354,7 @@ def create_app():
     app.router.add_get("/android/frame", get_android_frame)
     app.router.add_get("/android/status", get_android_status)
     app.router.add_post("/offer", offer)
+    app.router.add_get("/android/metrics", get_metrics)
     return app
 
 def run_server(host="0.0.0.0", port=8080):
