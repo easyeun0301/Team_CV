@@ -441,11 +441,11 @@ class PostureScoreManager:
         # Priority-based tie-breaking: RED > YELLOW > GREEN
         if neck_red_ratio >= neck_yellow_ratio and neck_red_ratio >= neck_green_ratio:
             neck_segment_color = "RED"
-            neck_delta = 4
+            neck_delta = 2.5
             neck_alert = True
         elif neck_yellow_ratio >= neck_green_ratio:
             neck_segment_color = "YELLOW"
-            neck_delta = 2
+            neck_delta = 1.5
             neck_alert = False
         else:
             neck_segment_color = "GREEN"
@@ -460,11 +460,11 @@ class PostureScoreManager:
         # Priority-based tie-breaking: RED > YELLOW > GREEN
         if spine_red_ratio >= spine_yellow_ratio and spine_red_ratio >= spine_green_ratio:
             spine_segment_color = "RED"
-            spine_delta = 4
+            spine_delta = 2.5
             spine_alert = True
         elif spine_yellow_ratio >= spine_green_ratio:
             spine_segment_color = "YELLOW"
-            spine_delta = 2
+            spine_delta = 1.5
             spine_alert = False
         else:
             spine_segment_color = "GREEN"
@@ -1368,7 +1368,7 @@ def main():
     except Exception:
         pass
     
-    preinitialize_libraries()
+    # preinitialize_libraries()
     
     parser = argparse.ArgumentParser(description="SpinePose Analysis with Posture Scoring")
     parser.add_argument("--host", default="0.0.0.0", help="Server host address")
@@ -1433,7 +1433,7 @@ def main():
     # �� Initialize posture score manager (10 seconds window)
     ctx.score_manager = PostureScoreManager(window_sec=10.0, max_duration_sec=180.0)
 
-    warmup_models(ctx, num_frames=args.warmup_frames)
+    # warmup_models(ctx, num_frames=args.warmup_frames)
 
     async def frame_callback(img):
         return await process_frame_callback(ctx, img)
