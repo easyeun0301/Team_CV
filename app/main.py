@@ -352,19 +352,19 @@ def main():
                 front_result = stream_manager.start_front_view()
                 side_result = stream_manager.start_side_view()
                 
-                if "시작됨" in front_result and "성공적으로" in side_result:
+                if "시작됨" in front_result or "성공적으로" in side_result:
                     # ⭐ 고개 관련 초기화
                     st.session_state.prev_bad_flag = False
                     st.session_state.last_bad_alert_ts = 0.0
                     st.session_state.last_penalty_ts = 0.0
-                    st.session_state.score = 35
+                    st.session_state.score = 50
                     st.session_state.last_score_update_ts = 0.0
                     
                     # ⭐ 어깨 관련 초기화
                     st.session_state.prev_shoulder_bad_flag = False
                     st.session_state.last_shoulder_alert_ts = 0.0
                     st.session_state.last_shoulder_penalty_ts = 0.0
-                    st.session_state.shoulder_score = 35
+                    st.session_state.shoulder_score = 50
                     st.session_state.last_shoulder_score_update_ts = 0.0
 
                     st.session_state.streaming = True
@@ -404,19 +404,19 @@ def main():
             col1, col2 = st.columns(2)
             
             with col1:
-                st.metric(label="얼굴 기울기 점수", value=f"{st.session_state.get('score', 35)} / 35")
-                if st.session_state.get('score', 35) >= 30:
+                st.metric(label="얼굴 기울기 점수", value=f"{st.session_state.get('score', 50)} / 50")
+                if st.session_state.get('score', 50) >= 40:
                     st.success("✅ 훌륭한 자세입니다!")
-                elif st.session_state.get('score', 35) >= 20:
+                elif st.session_state.get('score', 50) >= 30:
                     st.warning("⚠️ 자세 개선이 필요합니다.")
                 else:
                     st.error("❌ 자세 교정이 시급합니다!")
             
             with col2:
-                st.metric(label="어깨 균형 점수", value=f"{st.session_state.get('shoulder_score', 35)} / 35")
-                if st.session_state.get('shoulder_score', 35) >= 30:
+                st.metric(label="어깨 균형 점수", value=f"{st.session_state.get('shoulder_score', 50)} / 50")
+                if st.session_state.get('shoulder_score', 50) >= 40:
                     st.success("✅ 어깨 균형이 좋습니다!")
-                elif st.session_state.get('shoulder_score', 35) >= 20:
+                elif st.session_state.get('shoulder_score', 50) >= 30:
                     st.warning("⚠️ 어깨 균형 개선이 필요합니다.")
                 else:
                     st.error("❌ 어깨 균형 교정이 필요합니다!")
@@ -470,8 +470,8 @@ def main():
                     st.session_state.analysis_start_time = time.time()
                     
                     # ⭐ 점수/상태 초기화 (고개 + 어깨)
-                    st.session_state.score = 35
-                    st.session_state.shoulder_score = 35
+                    st.session_state.score = 50
+                    st.session_state.shoulder_score = 50
 
                     st.session_state.prev_bad_flag = False
                     st.session_state.prev_shoulder_bad_flag = False
@@ -497,6 +497,11 @@ def main():
         
         front_placeholder = col_front.empty()
         side_placeholder = col_side.empty()
+        side_score_ph = col_option.empty()
+        side_score2_ph = col_option.empty()
+        side_fhp_ph = col_option.empty()
+        side_curve_ph = col_option.empty()
+
 
         # 정면 영상 아래 점수 박스
         front_score_box = col_front.container()
@@ -553,8 +558,8 @@ def main():
 
             # 정면 점수 초기 렌더
             score_title_ph.markdown("### 📊 현재 점수")
-            head_score_ph.metric("얼굴 기울기", f"{st.session_state.get('score', 35)}/35")
-            shoulder_score_ph.metric("어깨 균형", f"{st.session_state.get('shoulder_score', 35)}/35")
+            head_score_ph.metric("얼굴 기울기", f"{st.session_state.get('score', 50)}/50")
+            shoulder_score_ph.metric("어깨 균형", f"{st.session_state.get('shoulder_score', 50)}/50")
 
             # 상태 요약
             st.markdown("---")
@@ -619,7 +624,7 @@ def main():
             # ===== (1) 고개 기울기 알림 (False→True 전이) =====
             if (not prev) and cur_bad and (now - st.session_state.get('last_bad_alert_ts', 0.0) >= BAD_ALERT_COOL_S):
                 # 점수 차감
-                st.session_state.score = max(0, st.session_state.get('score', 35) - 1)
+                st.session_state.score = max(0, st.session_state.get('score', 50) - 1)
                 st.session_state.last_bad_alert_ts = now
                 st.session_state.last_penalty_ts = now
                 
@@ -647,16 +652,16 @@ def main():
             # ===== (2) 고개 기울기 지속 감점 (10초마다) =====
             if cur_bad and prev:
                 if now - st.session_state.get('last_penalty_ts', now) >= PENALTY_INTERVAL_S:
-                    st.session_state.score = max(0, st.session_state.get('score', 35) - 1)
+                    st.session_state.score = max(0, st.session_state.get('score', 50) - 2)
                     st.session_state.last_penalty_ts = now
-                    st.toast(f"⏱ 지속 불량 자세: -1점 (현재 {st.session_state.score}점)")
+                    st.toast(f"⏱ 지속 불량 자세: -2점 (현재 {st.session_state.score}점)")
             
             # ===== (3) 어깨 비대칭 알림 (False→True 전이) =====
             if (not prev_sh) and cur_shoulder_bad and (now - st.session_state.get('last_shoulder_alert_ts', 0.0) >= BAD_ALERT_COOL_S):
-                st.session_state.shoulder_score = max(0, st.session_state.get('shoulder_score', 35) - 1)
+                st.session_state.shoulder_score = max(0, st.session_state.get('shoulder_score', 50) - 2)
                 st.session_state.last_shoulder_alert_ts = now
                 st.session_state.last_shoulder_penalty_ts = now
-                st.toast(f"⚠️ 어깨 비대칭 10초 지속: -1점 (현재 {st.session_state.shoulder_score}점)")
+                st.toast(f"⚠️ 어깨 비대칭 10초 지속: -2점 (현재 {st.session_state.shoulder_score}점)")
                 
                 # TTS
                 st.components.v1.html("""
@@ -679,20 +684,38 @@ def main():
             # ===== (4) 어깨 비대칭 지속 감점 (10초마다) =====
             if cur_shoulder_bad and prev_sh:
                 if now - st.session_state.get('last_shoulder_penalty_ts', now) >= PENALTY_INTERVAL_S:
-                    st.session_state.shoulder_score = max(0, st.session_state.get('shoulder_score', 35) - 1)
+                    st.session_state.shoulder_score = max(0, st.session_state.get('shoulder_score', 50) - 2)
                     st.session_state.last_shoulder_penalty_ts = now
-                    st.toast(f"⏱ 어깨 비대칭 지속: -1점 (현재 {st.session_state.shoulder_score}점)")
+                    st.toast(f"⏱ 어깨 비대칭 지속: -2점 (현재 {st.session_state.shoulder_score}점)")
             
             # ===== (5) 점수 UI 업데이트 (쓰로틀링) =====
             if now - st.session_state.get('last_score_update_ts', 0.0) >= SCORE_UPDATE_THROTTLE:
-                head_score_ph.metric("얼굴 기울기", f"{st.session_state.score}/35")
-                shoulder_score_ph.metric("어깨 균형", f"{st.session_state.shoulder_score}/35")
+                head_score_ph.metric("얼굴 기울기", f"{st.session_state.score}/50")
+                shoulder_score_ph.metric("어깨 균형", f"{st.session_state.shoulder_score}/50")
                 st.session_state.last_score_update_ts = now
                         
             # 이전 상태 갱신
             st.session_state.prev_bad_flag = cur_bad
             st.session_state.prev_shoulder_bad_flag = cur_shoulder_bad
             
+            # 측면 점수 가져오기 (10Hz 이하 주기)
+            SIDE_BASE = f"http://localhost:{stream_manager.side_port}"
+
+            if time.time() - st.session_state.get("last_side_metrics_ts", 0.0) >= 0.5:
+                try:
+                    r = requests.get(f"{SIDE_BASE}/android/metrics", timeout=0.4)
+                    if r.ok:
+                        m = r.json()
+                        side_score_ph.metric("측면 점수(목)", f"{m.get('neck_sum', 0)}")
+                        side_score2_ph.metric("측면 점수(척추)", f"{m.get('spine_sum', 0)}")
+                        if m.get("fhp_deg") is not None:
+                            side_fhp_ph.write(f"FHP: {m['fhp_deg']:.1f}°")
+                        if m.get("curve_deg") is not None:
+                            side_curve_ph.write(f"Curve: {m['curve_deg']:.1f}°")
+                        st.session_state["last_side_metrics_ts"] = time.time()
+                except Exception as e:
+                    print("[WARN] side metrics fetch failed:", e)
+
             # CPU 양보
             time.sleep(0.001)
         
