@@ -1144,6 +1144,25 @@ def _run_ai_pipeline(ctx: Context, img_bgr: np.ndarray) -> np.ndarray:
             neck_color = thr_neck_color(forward_head, ctx.config.FHP_THRESH_DEG)
             spine_color = thr_lumbar_color(spinal_curve, ctx.config.CURVE_THRESH_DEG)
             
+            # neck_color, spine_color 까지 계산된 바로 뒤
+            if ctx.score_manager:
+                ctx.score_manager.add_frame(neck_color, spine_color)
+                score_result = ctx.score_manager.check_and_score()
+                # (선택) score_result 활용 로깅 등
+
+            # ✅ 서버에 최신 값 push (각도 + 누적 점수)
+            try:
+                server.set_metrics({
+                    "fhp_deg": forward_head,   # None 가능
+                    "curve_deg": spinal_curve, # None 가능
+                    "neck_sum": neck_sum,      # 전역 누적
+                    "spine_sum": spine_sum     # 전역 누적
+                })
+            except Exception as e:
+                print("[WARN] set_metrics failed:", e)
+
+
+
             # �� Add to score manager
             if ctx.score_manager:
                 ctx.score_manager.add_frame(neck_color, spine_color)
