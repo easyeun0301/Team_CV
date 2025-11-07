@@ -584,7 +584,7 @@ def main():
                 )
 
                 # 최종 점수 계산: (정면 총점 × 측면 총점 × 테트리스 점수) × 0.01
-                final_score = round(((front_total + side_total) * 0.01) * tetris_score)
+                final_score = round(((front_total + side_total) * 0.5 * 0.01) * tetris_score)
 
                 st.metric("🏁 최종 점수", f"{final_score:,}점")
                 st.caption("계산식: ((정면 총점 + 측면 총점) × 테트리스 점수) × 0.01")
