@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 import io
 from datetime import datetime, timedelta
+import gc
 
 # 명령행 인자 파싱 함수 추가
 def parse_args():
@@ -428,6 +429,20 @@ def plot_posture_graph(history):
     st.pyplot(fig)
     plt.close()
 
+MAX_HISTORY = 300  # 약 5분치 데이터 (0.5초 간격 × 300회)
+
+def trim_history():
+    """score_history가 너무 길어지지 않도록 제한"""
+    if 'score_history' not in st.session_state:
+        return
+    hist = st.session_state.score_history
+    for key in [
+        'head_scores', 'shoulder_scores', 'neck_scores', 'spine_scores',
+        'head_timestamps', 'shoulder_timestamps', 'neck_timestamps', 'spine_timestamps'
+    ]:
+        if key in hist and len(hist[key]) > MAX_HISTORY:
+            hist[key] = hist[key][-MAX_HISTORY:]
+
 def main():
     args = parse_args()
     port = args.port
@@ -812,20 +827,12 @@ def main():
                     st.session_state.neck_score = 50
                     st.session_state.spine_score = 50
                     
-                    # 서버의 현재 누적값을 기준점으로 설정
+                    # 서버 리셋 요청
                     try:
                         SIDE_BASE = f"http://localhost:{stream_manager.side_port}"
-                        r = requests.get(f"{SIDE_BASE}/android/metrics", timeout=0.5)
-                        if r.ok:
-                            m = r.json()
-                            st.session_state.prev_neck_sum = m.get("neck_sum", 0)
-                            st.session_state.prev_spine_sum = m.get("spine_sum", 0)
-                        else:
-                            st.session_state.prev_neck_sum = 0
-                            st.session_state.prev_spine_sum = 0
-                    except:
-                        st.session_state.prev_neck_sum = 0
-                        st.session_state.prev_spine_sum = 0
+                        requests.get(f"{SIDE_BASE}/android/start", timeout=0.5)
+                    except Exception as e:
+                        pass
 
                     # 그래프 히스토리 초기화 - 1104 수정
                     st.session_state.score_history = {
@@ -1120,6 +1127,11 @@ def main():
                 head_score_ph.metric("얼굴 기울기", f"{st.session_state.score}/50")
                 shoulder_score_ph.metric("어깨 균형", f"{st.session_state.shoulder_score}/50")
                 st.session_state.last_score_update_ts = now
+            
+            # 메모리 정리
+            if now - st.session_state.get("last_gc_time", 0) > 10:
+                gc.collect()
+                st.session_state.last_gc_time = now
                         
             # 이전 상태 갱신
             st.session_state.prev_bad_flag = cur_bad
@@ -1128,27 +1140,18 @@ def main():
             # 측면 점수 가져오기 (10Hz 이하 주기)
             SIDE_BASE = f"http://localhost:{stream_manager.side_port}"
 
-            # 분석 시작 직후 1초 동안 metrics 업데이트 잠시 무시
-            if st.session_state.analysis_active and (time.time() - st.session_state.analysis_start_time) < 1.0:
-                time.sleep(0.001)
-                continue
+            if st.session_state.analysis_active:
+                if time.time() - st.session_state.get("last_side_metrics_ts", 0.0) >= 0.5:
+                    try:
+                        r = requests.get(f"{SIDE_BASE}/android/metrics", timeout=0.4)
+                        if r.ok:
+                            m = r.json()
+                            neck_sum = m.get("neck_sum", 0)
+                            spine_sum = m.get("spine_sum", 0)
 
-            if time.time() - st.session_state.get("last_side_metrics_ts", 0.0) >= 0.5:
-                try:
-                    r = requests.get(f"{SIDE_BASE}/android/metrics", timeout=0.4)
-                    if r.ok:
-                        m = r.json()
-                        
-                        neck_sum = m.get("neck_sum", 0)
-                        spine_sum = m.get("spine_sum", 0)
-
-                        # 분석 시작 기준점 대비 증가분만 감점
-                        delta_neck = max(0, neck_sum - st.session_state.get("prev_neck_sum", 0))
-                        delta_spine = max(0, spine_sum - st.session_state.get("prev_spine_sum", 0))
-
-                        if st.session_state.analysis_active:
-                            st.session_state.neck_score = max(0, 50 - delta_neck)
-                            st.session_state.spine_score = max(0, 50 - delta_spine)
+                            # 0부터 시작하는 누적 감점 적용
+                            st.session_state.neck_score = max(0, 50 - neck_sum)
+                            st.session_state.spine_score = max(0, 50 - spine_sum)
 
                             # 그래프 히스토리 업데이트
                             elapsed = now - st.session_state.score_history['start_time']
@@ -1157,16 +1160,19 @@ def main():
                             st.session_state.score_history['spine_timestamps'].append(elapsed)
                             st.session_state.score_history['spine_scores'].append(st.session_state.spine_score)
 
-                        # 분석 중이든 아니든 metric은 항상 표시
-                        side_score_ph.metric("거북목", f"{st.session_state.neck_score} / 50")
-                        side_score2_ph.metric("굽은 허리", f"{st.session_state.spine_score} / 50")
+                            # UI 갱신
+                            side_score_ph.metric("거북목", f"{st.session_state.neck_score} / 50")
+                            side_score2_ph.metric("굽은 허리", f"{st.session_state.spine_score} / 50")
 
-                        st.session_state["last_side_metrics_ts"] = time.time()
-                except Exception as e:
-                    print("[WARN] side metrics fetch failed:", e)
+                            st.session_state["last_side_metrics_ts"] = time.time()
 
+                            # 메모리 정리
+                            trim_history()
+
+                    except Exception as e:
+                        print("[WARN] side metrics fetch failed:", e)
             # CPU 양보
-            time.sleep(0.001)
+            time.sleep(0.01)
         
     else:
         st.info("모든 준비가 완료되었다면, '듀얼 스트리밍 시작' 버튼을 클릭해주세요!")
