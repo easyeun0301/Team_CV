@@ -14,6 +14,7 @@ logger = logging.getLogger("webrtc")
 # ─────────────────────────────────────────────────────────────
 pcs = set()
 relay = MediaRelay()
+reset_signal = False
 
 # AI 콜백 및 프레임 버스(최신 1장만 유지)
 frame_callback = None
@@ -37,6 +38,12 @@ latest_metrics = {
     "spine_sum": 0,
     "updated_ts": 0.0
 }
+
+async def start_analysis(request):
+    """Streamlit에서 호출 → reset_signal=True로 설정"""
+    global reset_signal
+    reset_signal = True
+    return web.json_response({"status": "reset_signal_set"})
 
 def set_metrics(mdict: dict):
     # 워커 스레드/이벤트 루프 상관없이 그냥 호출 가능
@@ -341,6 +348,13 @@ async def on_shutdown(app):
     await asyncio.gather(*[pc.close() for pc in pcs], return_exceptions=True)
     pcs.clear()
 
+async def get_reset_status(request):
+    """run.py가 서버로부터 리셋 신호를 감지"""
+    global reset_signal
+    val = reset_signal
+    reset_signal = False
+    return web.json_response({"reset_signal": val})
+
 # ─────────────────────────────────────────────────────────────
 # 앱/서버 생성 & 실행
 # ─────────────────────────────────────────────────────────────
@@ -355,6 +369,9 @@ def create_app():
     app.router.add_get("/android/status", get_android_status)
     app.router.add_post("/offer", offer)
     app.router.add_get("/android/metrics", get_metrics)
+    app.router.add_get("/android/reset", get_reset_status)
+    app.router.add_get("/android/start", start_analysis)
+    
     return app
 
 def run_server(host="0.0.0.0", port=8080):

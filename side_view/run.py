@@ -16,6 +16,21 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, Dict, Any, List, Callable
 from pathlib import Path
+import requests
+
+def maybe_reset(port):
+    """서버에서 reset_signal을 확인하고 감점 누적 초기화"""
+    global neck_sum, spine_sum
+    try:
+        SIDE_BASE = f"http://localhost:{port}"
+        r = requests.get(f"{SIDE_BASE}/android/reset", timeout=0.3)
+        if r.ok:
+            data = r.json()
+            if data.get("reset_signal"):
+                neck_sum = 0
+                spine_sum = 0
+    except Exception as e:
+        pass
 
 # Set environment variables before imports
 def setup_environment():
@@ -1185,10 +1200,11 @@ def _run_ai_pipeline(ctx: Context, img_bgr: np.ndarray) -> np.ndarray:
         return img_bgr
 
 # ========= (10) Inference Worker (Dedicated AI Thread) =========
-def inference_worker(ctx: Context):
+def inference_worker(ctx: Context, port: int):
     """Dedicated thread for heavy AI pipeline execution"""
     print("[Worker] AI Inference worker started.")
     while ctx.running:
+        maybe_reset(port)
         try:
             frame_bgr = ctx.frame_q.get(timeout=1.0)
             
@@ -1439,7 +1455,7 @@ def main():
         return await process_frame_callback(ctx, img)
     server.set_frame_callback(frame_callback)
 
-    worker_thread = threading.Thread(target=inference_worker, args=(ctx,), daemon=True)
+    worker_thread = threading.Thread(target=inference_worker, args=(ctx, args.port), daemon=True)
     display_thread = threading.Thread(target=display_worker, args=(ctx,), daemon=True)
     worker_thread.start()
     display_thread.start()
