@@ -66,14 +66,14 @@ logging.getLogger('aioice').setLevel(logging.WARNING)
 logging.getLogger('absl').disabled = True
 
 # ========= GLOBAL VARIABLES FOR STREAMLIT =========
-# �� Streamlit accesses these variables
+#  Streamlit accesses these variables
 neck_sum = 0      # Cumulative neck score (3 minutes)
 spine_sum = 0     # Cumulative spine score (3 minutes)
 
-# �� �뚮┝ �뚮옒洹� 異붽�
-neck_alert_flag = False    # True�대㈃ 嫄곕턿紐� 寃쎄퀬
-spine_alert_flag = False   # True�대㈃ 泥숈텛 寃쎄퀬
-LAST_ALERT = None          # �곸꽭 �뺣낫
+#  뚮┝ 뚮옒洹 異붽
+neck_alert_flag = False    # True대㈃ 嫄곕턿紐 寃쎄퀬
+spine_alert_flag = False   # True대㈃ 泥숈텛 寃쎄퀬
+LAST_ALERT = None          # 곸꽭 뺣낫
 
 def get_current_scores():
     """For Streamlit: Get current cumulative scores"""
@@ -117,9 +117,9 @@ class Config:
     DISPLAY_WINDOW_W: int = 480
     DISPLAY_WINDOW_H: int = 640
     
-    BP_PERIOD_MS: int = 400
-    SP_PERIOD_MS: int = 450
-    STICKY_MS: int = 450
+    BP_PERIOD_MS: int = 500  #  슂泥 蹂寃
+    SP_PERIOD_MS: int = 550  #  슂泥 蹂寃
+    STICKY_MS: int = 550     #  슂泥 蹂寃
     SPINE_SCORE_TH: float = 0.1
     INFER_SCALE: float = 0.25
 
@@ -361,7 +361,7 @@ class PostureScoreManager:
     
     def __init__(self, window_sec: float = 10.0, max_duration_sec: float = 180.0):
         self.window_sec = window_sec
-        self.max_duration_sec = max_duration_sec  # �� 3遺� (180珥�) �쒗븳
+        self.max_duration_sec = max_duration_sec  #  3遺 (180珥) 쒗븳
         
         # Color history (recent 10 seconds)
         self.color_history = deque()
@@ -372,13 +372,13 @@ class PostureScoreManager:
         self.last_check_time = time.time()
         self.start_time = time.time()
         
-        self.scoring_ended = False  # �� �먯닔 怨꾩궛 醫낅즺 �뚮옒洹�
+        self.scoring_ended = False  #  먯닔 怨꾩궛 醫낅즺 뚮옒洹
         
     def add_frame(self, neck_color: Tuple[int,int,int], spine_color: Tuple[int,int,int]):
         """Record neck/spine color every frame"""
         now = time.time()
         
-        # �� 3遺� 寃쎄낵 泥댄겕
+        #  3遺 寃쎄낵 泥댄겕
         elapsed = now - self.start_time
         if elapsed >= self.max_duration_sec and not self.scoring_ended:
             self.scoring_ended = True
@@ -387,7 +387,7 @@ class PostureScoreManager:
             print(f"[Final Score] neck_sum: {neck_sum}, spine_sum: {spine_sum}")
             print("="*70 + "\n")
         
-        # �� 3遺� �댄썑�먮뒗 �덉뒪�좊━�� 異붽� �� ��
+        #  3遺 댄썑먮뒗 덉뒪좊━ 異붽  
         if self.scoring_ended:
             return
         
@@ -401,9 +401,9 @@ class PostureScoreManager:
     def check_and_score(self) -> Optional[Dict[str, Any]]:
         """Evaluate every 10 seconds: separate neck/spine assessment"""
         global neck_sum, spine_sum, LAST_ALERT
-        global neck_alert_flag, spine_alert_flag  # �� 異붽�
+        global neck_alert_flag, spine_alert_flag  #  異붽
         
-        # �� 3遺� �댄썑�먮뒗 �됯� �� ��
+        #  3遺 댄썑먮뒗 됯  
         if self.scoring_ended:
             return None
         
@@ -486,7 +486,7 @@ class PostureScoreManager:
             spine_delta = 0
             spine_alert = False
         
-        # �� Update global variables
+        #  Update global variables
         neck_sum += neck_delta
         spine_sum += spine_delta
         
@@ -504,7 +504,7 @@ class PostureScoreManager:
         print(f"  Green:  {neck_green:3d} ({neck_green_ratio:.1%})")
         print(f"  -> Result: {neck_segment_color} (neck_sum +{neck_delta})")
         if neck_alert:
-            print(f"  �좑툘  Warning: Forward head posture alert!")
+            print(f"  좑툘  Warning: Forward head posture alert!")
         print()
         print(f"[SPINE Evaluation]")
         print(f"  Red:    {spine_red:3d} ({spine_red_ratio:.1%})")
@@ -512,33 +512,33 @@ class PostureScoreManager:
         print(f"  Green:  {spine_green:3d} ({spine_green_ratio:.1%})")
         print(f"  -> Result: {spine_segment_color} (spine_sum +{spine_delta})")
         if spine_alert:
-            print(f"  �좑툘  Warning: Spinal curvature alert!")
+            print(f"  좑툘  Warning: Spinal curvature alert!")
         print()
         print(f"[Cumulative Scores]")
         print(f"  neck_sum:  {neck_sum - neck_delta} -> {neck_sum} (+{neck_delta})")
         print(f"  spine_sum: {spine_sum - spine_delta} -> {spine_sum} (+{spine_delta})")
         print("="*70 + "\n")
         
-        # �� Update alert flags (only RED triggers alert)
+        #  Update alert flags (only RED triggers alert)
         if neck_alert:
-            neck_alert_flag = True  # �� �뚮옒洹� �ㅼ젙
+            neck_alert_flag = True  #  뚮옒洹 ㅼ젙
             LAST_ALERT = {
                 'type': 'neck',
                 'timestamp': now,
                 'score': neck_sum,
                 'segment': segment_num
             }
-            print(f"�슚 [ALERT FLAG] neck_alert_flag = True\n")
+            print(f"슚 [ALERT FLAG] neck_alert_flag = True\n")
         
         if spine_alert:
-            spine_alert_flag = True  # �� �뚮옒洹� �ㅼ젙
+            spine_alert_flag = True  #  뚮옒洹 ㅼ젙
             LAST_ALERT = {
                 'type': 'spine',
                 'timestamp': now,
                 'score': spine_sum,
                 'segment': segment_num
             }
-            print(f"�슚 [ALERT FLAG] spine_alert_flag = True\n")
+            print(f"슚 [ALERT FLAG] spine_alert_flag = True\n")
         
         # Save results
         result = {
@@ -628,8 +628,10 @@ class Context:
     _rgb_buffer: Optional[np.ndarray] = None
     _small_buffer: Optional[np.ndarray] = None
     
-    # �� Posture score manager
+    #  Posture score manager
     score_manager: Optional[PostureScoreManager] = None
+    #  [NEW] ROI/SpinePose 연속 실패 카운터
+    spine_fail_count: int = 0
 
 # ========= (6) Utility Functions (Vectorized) =========
 def lm_to_px_dict(res_lm, w: int, h: int, mp_pl) -> Dict[str, Tuple[int, int, float]]:
@@ -852,6 +854,77 @@ def calculate_forward_head_posture_torso(sp_kpts, sp_scores, neck_indices, lumba
     except Exception:
         return None
 
+def calculate_fhp_x_offset(sp_kpts, sp_scores, neck_indices, lumbar_indices, score_th: float = 0.2) -> Optional[float]:
+    """[NEW] Calculate forward head X-displacement (pixels) for penalty"""
+    try:
+        sp_kpts_arr = np.array(sp_kpts, dtype=np.float32)
+        sp_scores_arr = np.array(sp_scores, dtype=np.float32)
+        
+        # 1. Neck Keypoint (Uppermost point)
+        neck_mask = np.isin(np.arange(len(sp_kpts)), neck_indices) & (sp_scores_arr >= score_th)
+        neck_pts = sp_kpts_arr[neck_mask]
+        if len(neck_pts) < 1:
+            return None
+        
+        # Find the uppermost point (lowest Y) - highest point on the back of the head/neck
+        uppermost_neck_pt = neck_pts[np.argmin(neck_pts[:, 1])]
+        neck_x = uppermost_neck_pt[0]
+        
+        # 2. Torso Reference X-coordinate (Mid-Lumbar)
+        lumbar_mask = np.isin(np.arange(len(sp_kpts)), lumbar_indices) & (sp_scores_arr >= score_th)
+        lumbar_pts = sp_kpts_arr[lumbar_mask]
+        
+        if len(lumbar_pts) < 1:
+            # Fallback: use all valid spine keypoints median X as torso reference
+            all_mask = (sp_scores_arr >= score_th)
+            all_pts = sp_kpts_arr[all_mask]
+            if len(all_pts) < 3:
+                return None
+            torso_ref_x = np.median(all_pts[:, 0])
+        else:
+            torso_ref_x = np.mean(lumbar_pts[:, 0]) # Midpoint of lumbar keypoints
+
+        # 3. Calculate X-Offset: Neck X - Torso Ref X. Positive means forward.
+        fhp_x_offset = neck_x - torso_ref_x
+        
+        return float(fhp_x_offset)
+    except Exception:
+        return None
+
+def calculate_torso_tilt_angle(sp_kpts, sp_scores, neck_indices, lumbar_indices, score_th: float = 0.2) -> Optional[float]:
+    """[NEW] Calculate Torso Angle relative to vertical (Y-axis) in degrees for penalty"""
+    try:
+        sp_kpts_arr = np.array(sp_kpts, dtype=np.float32)
+        sp_scores_arr = np.array(sp_scores, dtype=np.float32)
+        
+        # 1. Upper Torso Point (Mid-Neck/Upper Thoracic)
+        neck_mask = np.isin(np.arange(len(sp_kpts)), neck_indices) & (sp_scores_arr >= score_th)
+        neck_pts = sp_kpts_arr[neck_mask]
+        if len(neck_pts) < 1: return None
+        p_upper = np.mean(neck_pts, axis=0) # Midpoint of neck keypoints
+
+        # 2. Lower Torso Point (Mid-Lumbar)
+        lumbar_mask = np.isin(np.arange(len(sp_kpts)), lumbar_indices) & (sp_scores_arr >= score_th)
+        lumbar_pts = sp_kpts_arr[lumbar_mask]
+        if len(lumbar_pts) < 1: return None
+        p_lower = np.mean(lumbar_pts, axis=0) # Midpoint of lumbar keypoints
+
+        # 3. Torso Vector and Tilt Angle
+        torso_vec_x = p_upper[0] - p_lower[0]
+        torso_vec_y = p_lower[1] - p_upper[1] # Y-axis points down, so Lower Y - Upper Y is positive for a vertical torso
+
+        if abs(torso_vec_y) < 1e-3: # Avoid division by zero/near-zero
+            return None
+        
+        # atan2(x, y) gives angle from +Y axis (vertical).
+        angle = np.degrees(np.arctan2(torso_vec_x, torso_vec_y))
+        
+        # Return the absolute angle from the vertical line (forward lean or backward lean)
+        return float(abs(angle))
+    except Exception:
+        return None
+
+
 def calculate_spinal_curvature(spine_coords: List[Tuple[int, int]]) -> Optional[float]:
     """Spinal curvature calculation"""
     if len(spine_coords) < 4:
@@ -952,9 +1025,16 @@ def render_display_frame(ctx: Context, img_bgr: np.ndarray, result: Dict[str, An
 
     canvas = img_bgr.copy()
 
-    forward_head = None
+    # --- START: POSTURE RISK SCORE CALCULATION FOR DISPLAY ---
+    forward_head_angle = None
     spinal_curve = None
+    final_neck_risk_score = None
+    final_spine_risk_score = None
     neck_pts, lumbar_pts = [], []
+    
+    # Penalty weights (Must match weights in _run_ai_pipeline)
+    WX = 0.3
+    WT = 1.2
 
     if has_valid:
         sp_kpts_arr = np.array(use["sp_kpts"], dtype=np.float32)
@@ -976,14 +1056,33 @@ def render_display_frame(ctx: Context, img_bgr: np.ndarray, result: Dict[str, An
         if len(all_spine_coords) >= 2:
             all_spine_coords.sort(key=lambda p: p[1])
 
-        forward_head = calculate_forward_head_posture_torso(
-            use["sp_kpts"], use["sp_scores"],
-            ctx.config.NECK_IDX, ctx.config.LUMBAR_IDX, score_th=0.2
+        # 1. Neck Risk Score
+        forward_head_angle = calculate_forward_head_posture_torso(
+            use["sp_kpts"], use["sp_scores"], ctx.config.NECK_IDX, ctx.config.LUMBAR_IDX, score_th=0.2
         )
-        spinal_curve = calculate_spinal_curvature(all_spine_coords)
+        fhp_x_offset = calculate_fhp_x_offset(
+            use["sp_kpts"], use["sp_scores"], ctx.config.NECK_IDX, ctx.config.LUMBAR_IDX, score_th=0.2
+        )
+        fhp_x_penalty = 0.0
+        if fhp_x_offset is not None and fhp_x_offset > 0:
+            fhp_x_penalty = fhp_x_offset * WX
+        if forward_head_angle is not None:
+            final_neck_risk_score = forward_head_angle + fhp_x_penalty
 
-        neck_color   = thr_neck_color(forward_head, ctx.config.FHP_THRESH_DEG)
-        lumbar_color = thr_lumbar_color(spinal_curve, ctx.config.CURVE_THRESH_DEG)
+        # 2. Spine Risk Score
+        spinal_curve = calculate_spinal_curvature(all_spine_coords)
+        torso_tilt_angle = calculate_torso_tilt_angle(
+            use["sp_kpts"], use["sp_scores"], ctx.config.NECK_IDX, ctx.config.LUMBAR_IDX, score_th=0.2
+        )
+        torso_tilt_penalty = 0.0
+        if torso_tilt_angle is not None and torso_tilt_angle > 5.0:
+            torso_tilt_penalty = torso_tilt_angle * WT
+        if spinal_curve is not None:
+            final_spine_risk_score = spinal_curve + torso_tilt_penalty
+
+        neck_color   = thr_neck_color(final_neck_risk_score, ctx.config.FHP_THRESH_DEG)
+        lumbar_color = thr_lumbar_color(final_spine_risk_score, ctx.config.CURVE_THRESH_DEG)
+        # --- END: POSTURE RISK SCORE CALCULATION FOR DISPLAY ---
 
         if len(neck_pts) >= 2:
             neck_pts_sorted = sorted(neck_pts, key=lambda p: p[1])
@@ -1026,17 +1125,25 @@ def render_display_frame(ctx: Context, img_bgr: np.ndarray, result: Dict[str, An
     thickness = 2
     
     if has_valid:
-        if forward_head is not None:
-            cv2.putText(canvas, f"Forward Head: {forward_head:.1f}deg",
+        if final_neck_risk_score is not None:
+            cv2.putText(canvas, f"Neck Risk Score: {final_neck_risk_score:.1f}deg",
                         (10, 34), cv2.FONT_HERSHEY_SIMPLEX, font_scale,
-                        thr_neck_color(forward_head, ctx.config.FHP_THRESH_DEG), 
+                        thr_neck_color(final_neck_risk_score, ctx.config.FHP_THRESH_DEG), 
                         thickness, cv2.LINE_AA)
         
-        if spinal_curve is not None:
-            cv2.putText(canvas, f"Spinal Curve: {spinal_curve:.1f}deg",
+        if final_spine_risk_score is not None:
+            cv2.putText(canvas, f"Spine Risk Score: {final_spine_risk_score:.1f}deg",
                         (10, 64), cv2.FONT_HERSHEY_SIMPLEX, font_scale,
-                        thr_lumbar_color(spinal_curve, ctx.config.CURVE_THRESH_DEG), 
+                        thr_lumbar_color(final_spine_risk_score, ctx.config.CURVE_THRESH_DEG), 
                         thickness, cv2.LINE_AA)
+        # Optional: Displaying raw angles for debugging (comment out if not needed)
+        if forward_head_angle is not None:
+             cv2.putText(canvas, f"FHP Angle: {forward_head_angle:.1f}deg",
+                        (10, 94), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1, cv2.LINE_AA)
+        if spinal_curve is not None:
+             cv2.putText(canvas, f"Curv Angle: {spinal_curve:.1f}deg",
+                        (10, 114), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1, cv2.LINE_AA)
+
 
     return canvas
 
@@ -1121,29 +1228,73 @@ def _run_ai_pipeline(ctx: Context, img_bgr: np.ndarray) -> np.ndarray:
         if now_ms >= ctx.next_sp_ts:
             ctx.next_sp_ts = now_ms + ctx.config.SP_PERIOD_MS
             
+            # --- 1. ROI Fallback Logic (전체 화면 탐색) ---
+            use_full_frame = False
+            if ctx.spine_fail_count >= 3:
+                use_full_frame = True
+                print("[Fallback] SpinePose failed 3 consecutive times. Attempting full frame search.")
+            
+            # ROI가 없으면 기본값으로 초기화
             if ctx.last_roi is None:
                 ctx.last_roi = ROICache(int(w*0.2), int(h*0.2), int(w*0.8), int(h*0.8))
             
-            bbox = ctx.last_roi.as_list()
-            sp_kpts, sp_scores = spinepose_infer_any(ctx.spine_est, img_rgb, 
-                                                     bboxes=bbox, already_rgb=True)
-        
+            
+            if use_full_frame:
+                # Fallback 발동: 전체 프레임을 ROI로 사용
+                full_roi = [[0, 0, w, h]]
+                sp_kpts, sp_scores = spinepose_infer_any(ctx.spine_est, img_rgb, 
+                                                         bboxes=full_roi, already_rgb=True)
+                
+            else:
+                # 일반 추론: 마지막으로 성공한 ROI를 사용
+                bbox = ctx.last_roi.as_list()
+                sp_kpts, sp_scores = spinepose_infer_any(ctx.spine_est, img_rgb, 
+                                                         bboxes=bbox, already_rgb=True)
+            # --- 2. SpinePose 추론 결과 처리 및 카운터 업데이트 ---
+
         result = {
             "sp_kpts": [(int(x), int(y)) for x, y in sp_kpts] if len(sp_kpts) > 0 else [],
             "sp_scores": sp_scores.tolist() if hasattr(sp_scores, 'tolist') and len(sp_scores) > 0 else (sp_scores if sp_scores else []),
             "roi": ctx.last_roi.as_tuple() if ctx.last_roi else None
         }
         
+        # --- START: POSTURE CALCULATION WITH PENALTIES ---
+        
+        # Penalty weights (Tuning required)
+        WX = 0.3 # FHP X-Offset Weight (e.g., 0.1 deg penalty per pixel)
+        WT = 1.2 # Torso Tilt Angle Weight (e.g., 50% of tilt angle as penalty)
+        
+        forward_head_angle = None
+        spinal_curve = None
+        final_neck_risk_score = None
+        final_spine_risk_score = None
+        
+        # 유효 키포인트 검출 성공 여부에 따라 카운터 업데이트 및 점수 계산
         if len(result.get("sp_kpts", [])) >= 3:
             ctx.last_good_results.update(result)
             ctx.last_update_ms = time.perf_counter() * 1000.0
+            ctx.spine_fail_count = 0  # 성공 시 카운터 초기화
             
-            # �� Calculate neck/spine angles and colors
-            forward_head = calculate_forward_head_posture_torso(
+            # 1. Neck FHP Angle (Base Score)
+            forward_head_angle = calculate_forward_head_posture_torso(
                 result["sp_kpts"], result["sp_scores"],
                 ctx.config.NECK_IDX, ctx.config.LUMBAR_IDX, score_th=0.2
             )
             
+            # 2. Neck FHP X-Offset Penalty (X-Axis difference)
+            fhp_x_offset = calculate_fhp_x_offset(
+                result["sp_kpts"], result["sp_scores"],
+                ctx.config.NECK_IDX, ctx.config.LUMBAR_IDX, score_th=0.2
+            )
+            
+            fhp_x_penalty = 0.0
+            if fhp_x_offset is not None and fhp_x_offset > 0:
+                fhp_x_penalty = fhp_x_offset * WX
+                
+            if forward_head_angle is not None:
+                final_neck_risk_score = forward_head_angle + fhp_x_penalty
+                
+            # 3. Spinal Curvature Angle (Base Score)
             all_spine_coords = []
             sp_kpts_arr = np.array(result["sp_kpts"], dtype=np.float32)
             sp_scores_arr = np.array(result["sp_scores"], dtype=np.float32)
@@ -1156,29 +1307,26 @@ def _run_ai_pipeline(ctx: Context, img_bgr: np.ndarray) -> np.ndarray:
             
             spinal_curve = calculate_spinal_curvature(all_spine_coords)
             
-            neck_color = thr_neck_color(forward_head, ctx.config.FHP_THRESH_DEG)
-            spine_color = thr_lumbar_color(spinal_curve, ctx.config.CURVE_THRESH_DEG)
+            # 4. Torso Tilt Angle Penalty (Vertical difference)
+            torso_tilt_angle = calculate_torso_tilt_angle(
+                result["sp_kpts"], result["sp_scores"],
+                ctx.config.NECK_IDX, ctx.config.LUMBAR_IDX, score_th=0.2
+            )
             
-            # neck_color, spine_color 까지 계산된 바로 뒤
-            if ctx.score_manager:
-                ctx.score_manager.add_frame(neck_color, spine_color)
-                score_result = ctx.score_manager.check_and_score()
-                # (선택) score_result 활용 로깅 등
+            torso_tilt_penalty = 0.0
+            if torso_tilt_angle is not None and torso_tilt_angle > 5.0:
+                torso_tilt_penalty = torso_tilt_angle * WT
+            
+            if spinal_curve is not None:
+                final_spine_risk_score = spinal_curve + torso_tilt_penalty
+                
+            # --- END: POSTURE CALCULATION WITH PENALTIES ---
 
-            # ✅ 서버에 최신 값 push (각도 + 누적 점수)
-            try:
-                server.set_metrics({
-                    "fhp_deg": forward_head,   # None 가능
-                    "curve_deg": spinal_curve, # None 가능
-                    "neck_sum": neck_sum,      # 전역 누적
-                    "spine_sum": spine_sum     # 전역 누적
-                })
-            except Exception as e:
-                print("[WARN] set_metrics failed:", e)
-
-
-
-            # �� Add to score manager
+            # Now use the final risk scores for thr_neck_color and thr_lumbar_color
+            neck_color = thr_neck_color(final_neck_risk_score, ctx.config.FHP_THRESH_DEG)
+            spine_color = thr_lumbar_color(final_spine_risk_score, ctx.config.CURVE_THRESH_DEG)
+            
+            #  Add to score manager
             if ctx.score_manager:
                 ctx.score_manager.add_frame(neck_color, spine_color)
                 
@@ -1188,9 +1336,24 @@ def _run_ai_pipeline(ctx: Context, img_bgr: np.ndarray) -> np.ndarray:
                 if score_result:
                     # Segment evaluated (terminal log already printed)
                     pass
-            if ctx.score_manager:
-                ctx.score_manager.check_and_score()
+            
+            # ✅ 서버에 최신 값 push (각도 + 누적 점수)
+            try:
+                server.set_metrics({
+                    "fhp_deg": forward_head_angle,   
+                    "curve_deg": spinal_curve, 
+                    "fhp_risk_score": final_neck_risk_score, 
+                    "spine_risk_score": final_spine_risk_score, 
+                    "neck_sum": neck_sum,      
+                    "spine_sum": spine_sum     
+                })
+            except Exception as e:
+                print("[WARN] set_metrics failed:", e)
         
+        else:
+            # 실패 시 카운터 증가 (Fallback 트리거)
+            ctx.spine_fail_count += 1 
+
         processed_frame = render_display_frame(ctx, img_bgr, result)
         
         return processed_frame
@@ -1430,6 +1593,9 @@ def main():
     print("  [4] Thread pool pre-initialization")
     print("  [5] Model disk caching" + (" (disabled)" if args.no_cache else ""))
     print("\n[NEW] Posture Scoring: Separate neck/spine evaluation every 10 seconds")
+    #  [NEW] Add Fallback and Penalty info
+    print("[NEW] Fallback: Full-frame search after 3 consecutive SpinePose failures.")
+    print("[NEW] Penalty: FHP X-Offset (0.1/px) & Torso Tilt (0.5/deg) applied to scores.")
 
     try:
         spine_est, mp_pose, pose = initialize_models_optimized(args.model_size)
@@ -1444,9 +1610,15 @@ def main():
     ctx.config.STREAMLIT_OUTPUT_W = args.streamlit_width
     ctx.config.STREAMLIT_OUTPUT_H = args.streamlit_height
     ctx.config.MEMORY_THRESHOLD_MB = args.memory_threshold
+    
+    #  [APPLY] BP/SP/STICKY settings requested by user
+    ctx.config.BP_PERIOD_MS = 500  
+    ctx.config.SP_PERIOD_MS = 550  
+    ctx.config.STICKY_MS = 550     
+
     ctx.memory_monitor = MemoryMonitor(threshold_mb=args.memory_threshold)
     
-    # �� Initialize posture score manager (10 seconds window)
+    #  Initialize posture score manager (10 seconds window)
     ctx.score_manager = PostureScoreManager(window_sec=10.0, max_duration_sec=180.0)
 
     # warmup_models(ctx, num_frames=args.warmup_frames)
