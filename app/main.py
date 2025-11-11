@@ -89,13 +89,25 @@ class OptimizedDualStreamManager:
         self.front_analyzer = FrontViewAnalyzer()
         self.front_cap = None
         self.front_running = False
+
+        # --- 캡쳐/분석 스레드 분리용 ---
+        # 캡쳐 스레드가 채우는 RAW 프레임 버퍼
+        self.front_raw_buffer = deque(maxlen=1)
+        self.front_raw_lock = threading.Lock()
+
+        # 분석 결과(오버레이가 올라간) 프레임 버퍼
         self.front_frame_buffer = deque(maxlen=1)
         self.front_lock = threading.Lock()
-        self.front_thread = None
+
+        # 두 개의 스레드 핸들
+        self.front_capture_thread = None
+        self.front_analysis_thread = None
+
+        # FPS 계산용
         self.front_fps = 0
         self.front_fps_counter = 0
         self.front_fps_start = time.time()
-        
+
         # 모델 처리 시간 측정
         self.front_process_times = []
         self.front_total_frames = 0
@@ -126,7 +138,7 @@ class OptimizedDualStreamManager:
         self.bad_posture_lock = threading.Lock()
 
     def start_front_view(self):
-        """웹캠 기반 Front View 시작 (최적화)"""
+        """웹캠 기반 Front View 시작 (캡쳐/분석 분리)"""
         if self.front_running:
             return "Front View가 이미 실행 중입니다."
             
@@ -141,48 +153,79 @@ class OptimizedDualStreamManager:
         self.front_cap.set(cv2.CAP_PROP_FPS, 60)
             
         self.front_running = True
-        self.front_thread = threading.Thread(target=self._optimized_front_worker, daemon=True)
-        self.front_thread.start()
-        
+
+        # 캡쳐 스레드 + 분석 스레드 따로 실행
+        self.front_capture_thread = threading.Thread(
+            target=self._front_capture_worker, daemon=True
+        )
+        self.front_analysis_thread = threading.Thread(
+            target=self._front_analysis_worker, daemon=True
+        )
+
+        self.front_capture_thread.start()
+        self.front_analysis_thread.start()
+
         return "Front View 시작됨"
-    
-    def _optimized_front_worker(self):
-        """최적화된 Front view 처리 워커 (논블로킹)"""
+
+    def _front_capture_worker(self):
+        """웹캠 캡쳐 전용 워커 (I/O만 담당)"""
         while self.front_running and self.front_cap and self.front_cap.isOpened():
+            # 버퍼의 가장 최신 프레임만 유지하기 위해 grab+read
             self.front_cap.grab()
             ret, frame = self.front_cap.read()
             if not ret:
                 continue
-                
-            # FPS 계산
+
+            # FPS 계산은 캡쳐 스레드에서
             self.front_fps_counter += 1
             if self.front_fps_counter % 30 == 0:
                 elapsed = time.time() - self.front_fps_start
                 self.front_fps = 30 / elapsed if elapsed > 0 else 0
                 self.front_fps_start = time.time()
-            
-            # 모델 처리 시간 측정 시작
+
+            # 최신 RAW 프레임 저장 (덮어쓰기)
+            with self.front_raw_lock:
+                self.front_raw_buffer.clear()
+                self.front_raw_buffer.append(frame)
+
+    def _front_analysis_worker(self):
+        """캡쳐된 RAW 프레임을 읽어서 Mediapipe/분석만 담당하는 워커"""
+        while self.front_running:
+            # 최신 RAW 프레임 가져오기
+            with self.front_raw_lock:
+                if self.front_raw_buffer:
+                    # copy() 해서 캡쳐 스레드가 같은 메모리를 건드려도 안전하게
+                    frame = self.front_raw_buffer[-1].copy()
+                else:
+                    frame = None
+
+            if frame is None:
+                # 아직 들어온 프레임이 없으면 잠깐 쉼
+                time.sleep(0.005)
+                continue
+
             process_start = time.time()
             self.front_total_frames += 1
-            
-            # 논블로킹 AI 처리
+
             try:
                 processed_frame, bad_flag = self.front_analyzer.analyze_frame(frame)
-                
-                # ⭐ 스레드 안전하게 플래그 업데이트
+
+                # 자세 플래그 업데이트 (기존과 동일)
                 with self.bad_posture_lock:
                     self.bad_posture_flag = bad_flag
                     self.shoulder_bad_flag = bool(self.front_analyzer.shoulder_bad_flag)
-                
+
                 process_time = (time.time() - process_start) * 1000
                 self.front_process_times.append(process_time)
-            except:
+            except Exception:
+                # 분석 실패 시 원본 프레임 그대로 사용
                 processed_frame = frame
-            
-            # 단일 버퍼 업데이트
+
+            # 스트림용 최종 프레임 버퍼에 반영
             with self.front_lock:
                 self.front_frame_buffer.clear()
                 self.front_frame_buffer.append(processed_frame)
+
     
     def start_side_view(self):
         """Side view HTTP 서버 시작 (최적화)"""
@@ -295,8 +338,16 @@ class OptimizedDualStreamManager:
         self.front_running = False
         if self.front_cap:
             self.front_cap.release()
-        if self.front_thread:
-            self.front_thread.join(timeout=2.0)
+            self.front_cap = None
+
+        # 캡쳐/분석 스레드 정리
+        if self.front_capture_thread:
+            self.front_capture_thread.join(timeout=2.0)
+            self.front_capture_thread = None
+
+        if self.front_analysis_thread:
+            self.front_analysis_thread.join(timeout=2.0)
+            self.front_analysis_thread = None
             
         # Side view 정지
         self.side_running = False
@@ -950,20 +1001,6 @@ def main():
                 if colB.button("투명도 ↓", key="alpha_dn_once"):
                     stream_manager.front_analyzer.ALPHA = max(0.1, stream_manager.front_analyzer.ALPHA - 0.1)
 
-            # ⭐ 점수 표시
-            #st.markdown("---")
-            #st.markdown("### 📊 현재 점수")
-            #score_placeholder = st.empty()
-            #score_placeholder2 = st.empty()
-            
-            #score_placeholder.metric("얼굴 기울기", f"{st.session_state.get('score', 35)}/35")
-            #score_placeholder2.metric("어깨 균형", f"{st.session_state.get('shoulder_score', 35)}/35")
-
-            # 정면 점수 초기 렌더
-            #score_title_ph.markdown("### 📊 현재 점수")
-            #head_score_ph.metric("얼굴 기울기", f"{st.session_state.get('score', 35)}/35")
-            #shoulder_score_ph.metric("어깨 균형", f"{st.session_state.get('shoulder_score', 35)}/35")
-
             # 상태 요약
             st.markdown("---")
             st.markdown("#### 설정 상태")
@@ -1079,7 +1116,7 @@ def main():
                     st.toast(f"⏱ 지속 불량 자세: -2점 (현재 {st.session_state.score}점)")
             
             # ===== (3) 어깨 비대칭 알림 (False→True 전이) =====
-            if (not prev_sh) and cur_shoulder_bad and (now - st.session_state.get('last_shoulder_alert_ts', 0.0) >= BAD_ALERT_COOL_S):
+            if (not prev_sh) and cur_shoulder_bad and (now - st.session_state.get('last_shoulder_alert_ts', 0.0) >= BAD_ALERT_COOL_S) and (now - st.session_state.analysis_start_time >= 10.0):
                 st.session_state.shoulder_score = max(0, st.session_state.get('shoulder_score', 50) - 2)
                 
                 # 히스토리 업데이트 추가 - 1106
@@ -1140,37 +1177,109 @@ def main():
             # 측면 점수 가져오기 (10Hz 이하 주기)
             SIDE_BASE = f"http://localhost:{stream_manager.side_port}"
 
-            if st.session_state.analysis_active:
-                if time.time() - st.session_state.get("last_side_metrics_ts", 0.0) >= 0.5:
-                    try:
-                        r = requests.get(f"{SIDE_BASE}/android/metrics", timeout=0.4)
-                        if r.ok:
-                            m = r.json()
-                            neck_sum = m.get("neck_sum", 0)
-                            spine_sum = m.get("spine_sum", 0)
+            # 분석 시작 직후 1초 동안 metrics 업데이트 잠시 무시
+            if st.session_state.analysis_active and (time.time() - st.session_state.analysis_start_time) < 1.0:
+                time.sleep(0.001)
+                continue
 
-                            # 0부터 시작하는 누적 감점 적용
-                            st.session_state.neck_score = max(0, 50 - neck_sum)
-                            st.session_state.spine_score = max(0, 50 - spine_sum)
+            # 0.5초에 한 번만 metrics 폴링
+            if time.time() - st.session_state.get("last_side_metrics_ts", 0.0) >= 0.5:
+                try:
+                    r = requests.get(f"{SIDE_BASE}/android/metrics", timeout=0.4)
+                    if r.ok:
+                        m = r.json()
 
-                            # 그래프 히스토리 업데이트
-                            elapsed = now - st.session_state.score_history['start_time']
-                            st.session_state.score_history['neck_timestamps'].append(elapsed)
-                            st.session_state.score_history['neck_scores'].append(st.session_state.neck_score)
-                            st.session_state.score_history['spine_timestamps'].append(elapsed)
-                            st.session_state.score_history['spine_scores'].append(st.session_state.spine_score)
+                        # 1) run.py에서 넘어온 누적 점수 neck_sum / spine_sum 가져오기
+                        neck_sum = m.get("neck_sum", 0.0)
+                        spine_sum = m.get("spine_sum", 0.0)
 
-                            # UI 갱신
-                            side_score_ph.metric("거북목", f"{st.session_state.neck_score} / 50")
-                            side_score2_ph.metric("굽은 허리", f"{st.session_state.spine_score} / 50")
+                        # 2) 이번 10초 구간에서 얼마만큼 증가했는지 delta 계산
+                        prev_neck_sum = st.session_state.get("prev_neck_sum", neck_sum)
+                        prev_spine_sum = st.session_state.get("prev_spine_sum", spine_sum)
+                        neck_delta = neck_sum - prev_neck_sum
+                        spine_delta = spine_sum - prev_spine_sum
 
-                            st.session_state["last_side_metrics_ts"] = time.time()
+                        # 다음 비교를 위해 저장
+                        st.session_state.prev_neck_sum = neck_sum
+                        st.session_state.prev_spine_sum = spine_sum
+                        st.session_state["last_side_metrics_ts"] = time.time()
 
-                            # 메모리 정리
-                            trim_history()
+                        # 3) 측면 점수(0~50)를 서서히 깎는 용도
+                        st.session_state.neck_score = max(
+                            0, st.session_state.neck_score - neck_delta * 0.5
+                        )
+                        st.session_state.spine_score = max(
+                            0, st.session_state.spine_score - spine_delta * 0.5
+                        )
 
-                    except Exception as e:
-                        print("[WARN] side metrics fetch failed:", e)
+                        # 4) 점수 UI 업데이트
+                        side_score_ph.metric("거북목", f"{st.session_state.neck_score:.1f} / 50")
+                        side_score2_ph.metric("굽은 허리", f"{st.session_state.spine_score:.1f} / 50")
+
+                        # 5) 그래프 히스토리 추가 (측면)
+                        elapsed_hist = now - st.session_state.score_history['start_time']
+                        st.session_state.score_history['neck_timestamps'].append(elapsed_hist)
+                        st.session_state.score_history['neck_scores'].append(st.session_state.neck_score)
+                        st.session_state.score_history['spine_timestamps'].append(elapsed_hist)
+                        st.session_state.score_history['spine_scores'].append(st.session_state.spine_score)
+
+                        # ====== 🔔 10초 RED 구간에서 토스트 + TTS 알림 ======
+                        # run.py에서 RED면 neck_delta / spine_delta가 2.5, YELLOW면 1.5, GREEN이면 0입니다.
+                        SIDE_COOLDOWN_S = 5.0  # 알림 쿨다운
+
+                        last_neck_alert_ts = st.session_state.get("last_side_neck_alert_ts", 0.0)
+                        last_spine_alert_ts = st.session_state.get("last_side_spine_alert_ts", 0.0)
+
+                        # 목: 이번 10초 구간이 RED(≈ delta >= 2)일 때
+                        if neck_delta >= 2.0 and (now - last_neck_alert_ts >= SIDE_COOLDOWN_S):
+                            st.toast("⚠️ 10초 동안 거북목이 감지되었습니다. 고개를 뒤로 살짝 당겨주세요.")
+
+                            st.components.v1.html("""
+                                <script>
+                                (function(){
+                                    const s = (window.top && window.top.speechSynthesis) || window.speechSynthesis;
+                                    const U = (window.top && window.top.SpeechSynthesisUtterance) || SpeechSynthesisUtterance;
+                                    if (s && U) {
+                                        const u = new U("10초 동안 거북목이 감지되었습니다. 고개를 뒤로 살짝 당겨주세요.");
+                                        u.lang = "ko-KR";
+                                        u.rate = 1.2;
+                                        u.pitch = 1.3;
+                                        s.cancel();
+                                        s.speak(u);
+                                    }
+                                })();
+                                </script>
+                            """, height=0)
+
+                            st.session_state["last_side_neck_alert_ts"] = now
+
+                        # 허리: 이번 10초 구간이 RED(≈ delta >= 2)일 때
+                        if spine_delta >= 2.0 and (now - last_spine_alert_ts >= SIDE_COOLDOWN_S):
+                            st.toast("⚠️ 10초 동안 허리가 많이 굽어 있었습니다. 허리를 쭉 펴 주세요.")
+
+                            st.components.v1.html("""
+                                <script>
+                                (function(){
+                                    const s = (window.top && window.top.speechSynthesis) || window.speechSynthesis;
+                                    const U = (window.top && window.top.SpeechSynthesisUtterance) || SpeechSynthesisUtterance;
+                                    if (s && U) {
+                                        const u = new U("10초 동안 허리가 많이 굽어 있었습니다. 허리를 쭉 펴 주세요.");
+                                        u.lang = "ko-KR";
+                                        u.rate = 1.2;
+                                        u.pitch = 1.3;
+                                        s.cancel();
+                                        s.speak(u);
+                                    }
+                                })();
+                                </script>
+                            """, height=0)
+
+                            st.session_state["last_side_spine_alert_ts"] = now
+
+                except Exception as e:
+                    # 측면 metrics 가져오기 실패 시 로그만 찍고 무시
+                    print("[WARN] side metrics fetch failed:", e)
+
             # CPU 양보
             time.sleep(0.01)
         
