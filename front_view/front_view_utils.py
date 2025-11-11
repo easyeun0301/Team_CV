@@ -672,6 +672,12 @@ class FrontViewAnalyzer:
                 #self.metrics_lines.append((f"Nose   dx={dx_nc_s:.1f}/{thr_nose:.1f}px",
                 #                (0, 200, 0) if nose_aligned else RED))
 
+        if not results_face.multi_face_landmarks:
+            return frame, False  # 얼굴 미검출 시 바로 반환
+        
+        if not results_pose.pose_landmarks:
+            return frame, False  # 자세 미검출 시 바로 반환
+
         # 상태 표시
         any_ok = None
         if head_level_face is not None or (shoulders_level is not None and nose_aligned is not None):
