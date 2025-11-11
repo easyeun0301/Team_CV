@@ -1140,37 +1140,109 @@ def main():
             # 측면 점수 가져오기 (10Hz 이하 주기)
             SIDE_BASE = f"http://localhost:{stream_manager.side_port}"
 
-            if st.session_state.analysis_active:
-                if time.time() - st.session_state.get("last_side_metrics_ts", 0.0) >= 0.5:
-                    try:
-                        r = requests.get(f"{SIDE_BASE}/android/metrics", timeout=0.4)
-                        if r.ok:
-                            m = r.json()
-                            neck_sum = m.get("neck_sum", 0)
-                            spine_sum = m.get("spine_sum", 0)
+            # 분석 시작 직후 1초 동안 metrics 업데이트 잠시 무시
+            if st.session_state.analysis_active and (time.time() - st.session_state.analysis_start_time) < 1.0:
+                time.sleep(0.001)
+                continue
 
-                            # 0부터 시작하는 누적 감점 적용
-                            st.session_state.neck_score = max(0, 50 - neck_sum)
-                            st.session_state.spine_score = max(0, 50 - spine_sum)
+            # 0.5초에 한 번만 metrics 폴링
+            if time.time() - st.session_state.get("last_side_metrics_ts", 0.0) >= 0.5:
+                try:
+                    r = requests.get(f"{SIDE_BASE}/android/metrics", timeout=0.4)
+                    if r.ok:
+                        m = r.json()
 
-                            # 그래프 히스토리 업데이트
-                            elapsed = now - st.session_state.score_history['start_time']
-                            st.session_state.score_history['neck_timestamps'].append(elapsed)
-                            st.session_state.score_history['neck_scores'].append(st.session_state.neck_score)
-                            st.session_state.score_history['spine_timestamps'].append(elapsed)
-                            st.session_state.score_history['spine_scores'].append(st.session_state.spine_score)
+                        # 1) run.py에서 넘어온 누적 점수 neck_sum / spine_sum 가져오기
+                        neck_sum = m.get("neck_sum", 0.0)
+                        spine_sum = m.get("spine_sum", 0.0)
 
-                            # UI 갱신
-                            side_score_ph.metric("거북목", f"{st.session_state.neck_score} / 50")
-                            side_score2_ph.metric("굽은 허리", f"{st.session_state.spine_score} / 50")
+                        # 2) 이번 10초 구간에서 얼마만큼 증가했는지 delta 계산
+                        prev_neck_sum = st.session_state.get("prev_neck_sum", neck_sum)
+                        prev_spine_sum = st.session_state.get("prev_spine_sum", spine_sum)
+                        neck_delta = neck_sum - prev_neck_sum
+                        spine_delta = spine_sum - prev_spine_sum
 
-                            st.session_state["last_side_metrics_ts"] = time.time()
+                        # 다음 비교를 위해 저장
+                        st.session_state.prev_neck_sum = neck_sum
+                        st.session_state.prev_spine_sum = spine_sum
+                        st.session_state["last_side_metrics_ts"] = time.time()
 
-                            # 메모리 정리
-                            trim_history()
+                        # 3) 측면 점수(0~50)를 서서히 깎는 용도
+                        st.session_state.neck_score = max(
+                            0, st.session_state.neck_score - neck_delta * 0.5
+                        )
+                        st.session_state.spine_score = max(
+                            0, st.session_state.spine_score - spine_delta * 0.5
+                        )
 
-                    except Exception as e:
-                        print("[WARN] side metrics fetch failed:", e)
+                        # 4) 점수 UI 업데이트
+                        side_score_ph.metric("거북목", f"{st.session_state.neck_score:.1f} / 50")
+                        side_score2_ph.metric("굽은 허리", f"{st.session_state.spine_score:.1f} / 50")
+
+                        # 5) 그래프 히스토리 추가 (측면)
+                        elapsed_hist = now - st.session_state.score_history['start_time']
+                        st.session_state.score_history['neck_timestamps'].append(elapsed_hist)
+                        st.session_state.score_history['neck_scores'].append(st.session_state.neck_score)
+                        st.session_state.score_history['spine_timestamps'].append(elapsed_hist)
+                        st.session_state.score_history['spine_scores'].append(st.session_state.spine_score)
+
+                        # ====== 🔔 10초 RED 구간에서 토스트 + TTS 알림 ======
+                        # run.py에서 RED면 neck_delta / spine_delta가 2.5, YELLOW면 1.5, GREEN이면 0입니다.
+                        SIDE_COOLDOWN_S = 5.0  # 알림 쿨다운
+
+                        last_neck_alert_ts = st.session_state.get("last_side_neck_alert_ts", 0.0)
+                        last_spine_alert_ts = st.session_state.get("last_side_spine_alert_ts", 0.0)
+
+                        # 목: 이번 10초 구간이 RED(≈ delta >= 2)일 때
+                        if neck_delta >= 2.0 and (now - last_neck_alert_ts >= SIDE_COOLDOWN_S):
+                            st.toast("⚠️ 10초 동안 거북목이 감지되었습니다. 고개를 뒤로 살짝 당겨주세요.")
+
+                            st.components.v1.html("""
+                                <script>
+                                (function(){
+                                    const s = (window.top && window.top.speechSynthesis) || window.speechSynthesis;
+                                    const U = (window.top && window.top.SpeechSynthesisUtterance) || SpeechSynthesisUtterance;
+                                    if (s && U) {
+                                        const u = new U("10초 동안 거북목이 감지되었습니다. 고개를 뒤로 살짝 당겨주세요.");
+                                        u.lang = "ko-KR";
+                                        u.rate = 1.2;
+                                        u.pitch = 1.3;
+                                        s.cancel();
+                                        s.speak(u);
+                                    }
+                                })();
+                                </script>
+                            """, height=0)
+
+                            st.session_state["last_side_neck_alert_ts"] = now
+
+                        # 허리: 이번 10초 구간이 RED(≈ delta >= 2)일 때
+                        if spine_delta >= 2.0 and (now - last_spine_alert_ts >= SIDE_COOLDOWN_S):
+                            st.toast("⚠️ 10초 동안 허리가 많이 굽어 있었습니다. 허리를 쭉 펴 주세요.")
+
+                            st.components.v1.html("""
+                                <script>
+                                (function(){
+                                    const s = (window.top && window.top.speechSynthesis) || window.speechSynthesis;
+                                    const U = (window.top && window.top.SpeechSynthesisUtterance) || SpeechSynthesisUtterance;
+                                    if (s && U) {
+                                        const u = new U("10초 동안 허리가 많이 굽어 있었습니다. 허리를 쭉 펴 주세요.");
+                                        u.lang = "ko-KR";
+                                        u.rate = 1.2;
+                                        u.pitch = 1.3;
+                                        s.cancel();
+                                        s.speak(u);
+                                    }
+                                })();
+                                </script>
+                            """, height=0)
+
+                            st.session_state["last_side_spine_alert_ts"] = now
+
+                except Exception as e:
+                    # 측면 metrics 가져오기 실패 시 로그만 찍고 무시
+                    print("[WARN] side metrics fetch failed:", e)
+
             # CPU 양보
             time.sleep(0.01)
         
